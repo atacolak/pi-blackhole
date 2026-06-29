@@ -17,6 +17,7 @@ import { debugLog, withDebugLogContext } from "./debug-log.js";
 import { type ResolveResult, type Runtime } from "./runtime.js";
 import { isRetryableError } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
+import { writeRunArtifact, observerArtifact, reflectorArtifact, dropperArtifact } from "./run-artifact.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
 
 /** Fixed overhead for system prompt, tool definitions, and turn scaffold in context window pre-check. */
@@ -654,6 +655,11 @@ async function runObserverStage(
 				const data = buildObservationsRecordedData(result.observations, coversUpToId);
 				if (!data) { runtime.advanceCursor("observer", coversUpToId, "empty"); return "continue"; }
 				debugLog("observer.records", { count: result.observations.length, observationTokens: result.observations.reduce((s: number, o: any) => s + o.tokenCount, 0), coversUpToId });
+				writeRunArtifact(ctx.cwd, sessionId, observerArtifact(
+					{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
+					chunkTokens, priorReflections.length, priorObservations.length,
+					sourceEntryIds.length, result.observations,
+				));
 				if (runtime.config.noAutoCompact) {
 					savePendingObservation(sessionId, { coversUpToId, data });
 					debugLog("observer.pending", { count: result.observations.length, coversUpToId, sessionId });
@@ -685,6 +691,11 @@ async function runObserverStage(
 					: "warning"
 				: "warning";
 			debugLog("observer.empty", { coversUpToId, reason: reason?.kind });
+			writeRunArtifact(ctx.cwd, sessionId, observerArtifact(
+				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
+				chunkTokens, priorReflections.length, priorObservations.length,
+				sourceEntryIds.length, [], reasonLabel,
+			));
 			runtime.advanceCursor("observer", coversUpToId, "empty");
 			if (ctx.hasUI) ctx.ui?.notify(`Observational memory: no observations — ${reasonLabel}`, reasonLevel);
 			return "continue";
@@ -824,6 +835,11 @@ async function runReflectorStage(
 				runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "empty");
 				return { outcome: "continue", sameRunReflections: [] };
 			}
+
+			writeRunArtifact(ctx.cwd, sessionId, reflectorArtifact(
+				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
+				reflectionTokens, newObservations.length, newReflections.length, reflections,
+			));
 
 			const data = buildReflectionsRecordedData(reflections, observationCoverageId);
 			if (!data) {
@@ -968,12 +984,31 @@ async function runDropperStage(
 				: latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
 			const effectiveReflectionCoverageId = sameRunReflectionCoverageId ?? latestReflectionCoverageId;
 			const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, effectiveReflectionCoverageId);
+			const observationTokens = newObservations.reduce((s: number, o: any) => s + (o.tokenCount ?? 0), 0);
+			const dropFullness = observationTokens / (runtime.config.observationsPoolMaxTokens || 1);
+			const dropUrgency = dropFullness < 0.30 ? "low" : dropFullness < 0.60 ? "medium" : "high";
+			writeRunArtifact(ctx.cwd, sessionId, dropperArtifact(
+				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
+				dropTokens, newObservations.length, reflectionsForDropper.length,
+				observationTokens, runtime.config.observationsPoolMaxTokens,
+				droppedIds ?? undefined, dropFullness, dropUrgency,
+			));
 			const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
 			if (data && coversUpToId) {
 				if (runtime.config.noAutoCompact) {
 					savePendingDropped(sessionId, { coversUpToId, data });
 				} else {
 					appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+				}
+				runtime.advanceCursor("dropper", coversUpToId, "recorded");
+			} else if (coversUpToId && droppedIds && droppedIds.length === 0) {
+				// Coverage advancement: dropper ran clean — nothing needed pruning.
+				// Write empty marker so coverage advances, preventing infinite re-trigger
+				// when the pool is well under budget.
+				if (runtime.config.noAutoCompact) {
+					savePendingDropped(sessionId, { coversUpToId, data: { observationIds: [], coversUpToId } });
+				} else {
+					appendEntry(pi, OM_OBSERVATIONS_DROPPED, { observationIds: [], coversUpToId });
 				}
 				runtime.advanceCursor("dropper", coversUpToId, "recorded");
 			} else {

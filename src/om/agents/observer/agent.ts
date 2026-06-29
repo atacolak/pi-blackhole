@@ -16,7 +16,7 @@ import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
-import type { Observation, Relevance } from "../../ledger/index.js";
+import type { Observation, ObservationKind, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
 
 interface RunObserverArgs {
@@ -67,6 +67,17 @@ const RecordObservationsSchema = Type.Object({
 						"Use only ids shown in '[Source entry id: ...]' labels; never invent ids.",
 				},
 			),
+			kind: Type.Union([
+				Type.Literal("objective"),
+				Type.Literal("reflexive"),
+				Type.Literal("intentional"),
+			], {
+				description:
+					"Epistemic category: objective (grounded in tool results / verifiable facts), " +
+					"reflexive (model's own reasoning about its process or state), " +
+					"intentional (user's stated goals, preferences, identity, or assertions). " +
+					"Derive from the source entry role labels in the chunk ([User @ ...], [Assistant @ ...], [Tool result for ... @ ...]).",
+			}),
 		}),
 		{ description: "Batch of new observations. May be empty only if the tool is not called at all." },
 	),
@@ -112,6 +123,11 @@ export type ObserverEmptyReason =
 export interface ObserverResult {
 	observations: Observation[] | undefined;
 	emptyReason?: ObserverEmptyReason;
+	/** Full prompt text sent to the model (user message + system prompt). */
+	prompt: {
+		system: string;
+		user: string;
+	};
 }
 
 export async function runObserver(args: RunObserverArgs): Promise<ObserverResult> {
@@ -159,6 +175,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
 					relevance: obs.relevance as Relevance,
 					sourceEntryIds,
 					tokenCount: estimateStringTokens(content),
+					kind: obs.kind as ObservationKind,
 				});
 				added++;
 			}
@@ -235,6 +252,11 @@ ${conversation}`;
 	// other extensions (e.g., claude-bridge). The bridge looks up streamSimple functions
 	const bridgeStreamFn = createBridgeStreamFn(streamSimple);
 	const streamFn = args.streamFn ?? bridgeStreamFn;
+	const promptCapture = {
+		system: OBSERVER_SYSTEM,
+		user: userText,
+	};
+
 	const stream = loop(prompts, context, config, signal, streamFn);
 	let agentError: string | undefined;
 	for await (const event of stream) {
@@ -267,8 +289,8 @@ ${conversation}`;
 		} else {
 			emptyReason = { kind: "no_new_content" };
 		}
-		return { observations: undefined, emptyReason };
+		return { observations: undefined, emptyReason, prompt: promptCapture };
 	}
 
-	return { observations: Array.from(accumulated.values()) };
+	return { observations: Array.from(accumulated.values()), prompt: promptCapture };
 }

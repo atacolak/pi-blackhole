@@ -12,6 +12,9 @@ export const OM_FOLDED = "om.folded";
 export const RELEVANCE_VALUES = ["low", "medium", "high", "critical"] as const;
 export type Relevance = (typeof RELEVANCE_VALUES)[number];
 
+export const OBSERVATION_KIND_VALUES = ["objective", "reflexive", "intentional"] as const;
+export type ObservationKind = (typeof OBSERVATION_KIND_VALUES)[number];
+
 export const MEMORY_ID_PATTERN = /^[a-f0-9]{12}$/i;
 
 export type Entry = {
@@ -35,6 +38,7 @@ export type Observation = {
 	relevance: Relevance;
 	sourceEntryIds: string[];
 	tokenCount: number;
+	kind?: ObservationKind;
 };
 
 export type Reflection = {
@@ -47,16 +51,23 @@ export type Reflection = {
 export type ObservationsRecordedEntryData = {
 	observations: Observation[];
 	coversUpToId: string;
+	runIndex?: number;
+	blackholeArtifact?: string;
+	sourceEntryTypes?: Record<string, string>;
 };
 
 export type ReflectionsRecordedEntryData = {
 	reflections: Reflection[];
 	coversUpToId: string;
+	runIndex?: number;
+	blackholeArtifact?: string;
 };
 
 export type ObservationsDroppedEntryData = {
 	observationIds: string[];
 	coversUpToId: string;
+	runIndex?: number;
+	blackholeArtifact?: string;
 };
 
 export type MemoryDetails = {
@@ -74,6 +85,10 @@ export type V3MemoryCustomType =
 
 export function isRelevance(value: unknown): value is Relevance {
 	return typeof value === "string" && (RELEVANCE_VALUES as readonly string[]).includes(value);
+}
+
+export function isObservationKind(value: unknown): value is ObservationKind {
+	return typeof value === "string" && (OBSERVATION_KIND_VALUES as readonly string[]).includes(value);
 }
 
 export function isNonEmptyString(value: unknown): value is string {
@@ -184,23 +199,26 @@ export function isObservationsDroppedEntry(entry: Entry): entry is Entry & {
 export function buildObservationsRecordedData(
 	observations: Observation[],
 	coversUpToId: string,
+	extra?: { runIndex?: number; blackholeArtifact?: string; sourceEntryTypes?: Record<string, string> },
 ): ObservationsRecordedEntryData | undefined {
 	if (observations.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
-	return { observations, coversUpToId };
+	return { observations, coversUpToId, ...extra };
 }
 
 export function buildReflectionsRecordedData(
 	reflections: Reflection[],
 	coversUpToId: string,
+	extra?: { runIndex?: number; blackholeArtifact?: string },
 ): ReflectionsRecordedEntryData | undefined {
 	if (reflections.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
-	return { reflections, coversUpToId };
+	return { reflections, coversUpToId, ...extra };
 }
 
 export function buildObservationsDroppedData(
 	observationIds: string[],
 	coversUpToId: string,
+	extra?: { runIndex?: number; blackholeArtifact?: string },
 ): ObservationsDroppedEntryData | undefined {
 	if (observationIds.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
-	return { observationIds, coversUpToId };
+	return { observationIds, coversUpToId, ...extra };
 }

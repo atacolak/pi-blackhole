@@ -18,7 +18,8 @@ export const OM_FOOTER_FULL = `----\n${OM_INSTRUCTIONS_FULL}\n----`;
 export const OM_FOOTER_BASIC = `----\n${OM_INSTRUCTIONS_BASIC}\n----`;
 
 export function observationToSummaryLine(observation: Observation): string {
-	return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] ${observation.content}`;
+	const kindPart = observation.kind ? ` [${observation.kind}]` : '';
+	return `[${observation.id}] ${observation.timestamp} [${observation.relevance}]${kindPart} ${observation.content}`;
 }
 
 /** Score an observation for cap/trim selection.

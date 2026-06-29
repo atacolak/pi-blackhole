@@ -99,6 +99,20 @@ Detail preservation. When an observation references specific things, preserve th
 
 If a detail is non-obvious from the code or git history, it belongs in the observation. If it is trivially re-derivable, it does not.
 
+Epistemic kind (pick one per observation; this field drives how downstream stages use the observation):
+
+- objective: the observation is grounded in tool output, file content, command results — verifiable facts about the world. Assign this when your source entry labels show "[Tool result for ... @ ...]" as the primary evidence.
+- reflexive: the observation is about the model's own reasoning, process, or state — what the assistant noticed, inferred, or thought. Assign this when the source entry labels show "[Assistant @ ...]" and the content is the model's thinking or self-reflection.
+- intentional: the observation captures the user's stated goals, preferences, identity, corrections, or assertions. Assign this when the source entry labels show "[User @ ...]" as the primary evidence.
+
+How to decide: look at the source entry role labels in the chunk. If the observation is supported primarily by tool results, it's objective. If it's primarily what the user said, it's intentional. If it's about the model's own thoughts, it's reflexive. An observation citing mixed sources should use the dominant role. "Primarily" means the most authoritative source type — tool results > user messages > assistant thinking.
+
+  BAD:  kind=reflexive for "Tests pass after fixing the auth endpoint." (this is grounded in a tool result — objective)
+  BAD:  kind=objective for "User stated they use pnpm, not npm." (this is what the user said — intentional)
+  GOOD: kind=objective for "Build passed: 42 tests, 0 failures (npm test output)".
+  GOOD: kind=reflexive for "Assistant realized the bug was in the import order, not the type definition."
+  GOOD: kind=intentional for "User said they want to use SQLite instead of Postgres for local dev."
+
 Relevance levels (pick one per observation; this field drives future dropping):
 
 - critical: user assertions about identity, role, or persistent preferences; explicit corrections ("no, don't do X"); concrete completions that future runs MUST NOT redo. These are highest-resistance, load-bearing observations and require the strongest evidence before leaving active memory. Why this matters: if a "critical" item is lost, the assistant may redo finished work, contradict a correction, or misrepresent who the user is.

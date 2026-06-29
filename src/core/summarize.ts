@@ -164,15 +164,35 @@ export const compile = (input: CompileInput): string => {
   prev = prev ? stripOMContent(prev) : undefined;
   const merged = prev ? mergePrevious(prev, fresh) : fresh;
   if (!merged) return "";
-  return wrapLongLines(merged + SEPARATOR + RECALL_NOTE);
+  return wrapLongLines(merged) + SEPARATOR + RECALL_NOTE;
 };
 
 const stripRecallNote = (text: string): string => {
   // Remove trailing RECALL_NOTE (and any separators surrounding it) if present.
   // Handles both current format (---\n\nNOTE) and bare trailing NOTE.
+  // Also handles the wrapped variant (from pre-fix compactions where wrapLongLines
+  // broke the note across multiple lines). Uses a flexible regex that tolerates
+  // line breaks inserted by the 120-char line wrapper.
   const idx = text.lastIndexOf(RECALL_NOTE);
-  if (idx < 0) return text;
-  return text.slice(0, idx).replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
+  if (idx >= 0) {
+    return text.slice(0, idx).replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
+  }
+  // Fallback: handle wrapped variant from compactions before the wrapLongLines fix.
+  // The wrapped note has line breaks inserted at ~120-char boundaries, making
+  // exact string match impossible. Search for the opening sentence instead.
+  const opening = "The conversation before this point has been compacted into the summary";
+  const wrappedIdx = text.indexOf(opening);
+  if (wrappedIdx >= 0) {
+    // Check that this looks like a compaction boundary separator + RECALL_NOTE
+    // (at the end of the text, possibly preceded by ---)
+    const before = text.slice(0, wrappedIdx).trimEnd();
+    // Only strip if it's at the end (within reason) — not mid-transcript
+    const after = text.slice(wrappedIdx);
+    if (after.length < 600 && text.length - wrappedIdx < text.length * 0.4) {
+      return before.replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
+    }
+  }
+  return text;
 };
 
 /**
