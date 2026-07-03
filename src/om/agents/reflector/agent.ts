@@ -17,6 +17,7 @@ import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { observationToSummaryLine, reflectionToSummaryLine, type Observation, type Reflection } from "../../ledger/index.js";
+import { messageToTranscriptTurn, type TranscriptTurn } from "../../run-artifact.js";
 import type { ReflectionCoverageTier } from "../dropper/coverage.js";
 
 interface RunReflectorArgs {
@@ -80,7 +81,16 @@ function normalizeReflectionContent(content: string): string | undefined {
 	return normalized;
 }
 
-export async function runReflector(args: RunReflectorArgs): Promise<Reflection[] | undefined> {
+export interface ReflectorResult {
+	reflections: Reflection[];
+	prompt: {
+		system: string;
+		user: string;
+	};
+	transcript?: TranscriptTurn[];
+}
+
+export async function runReflector(args: RunReflectorArgs): Promise<ReflectorResult | undefined> {
 	const { model, apiKey, headers, reflections, observations, signal } = args;
 	if (observations.length === 0) return undefined;
 
@@ -132,6 +142,10 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 		: '';
 
 	const userText = `${existingReflectionsContext}${existingObservationsContext}NEW REFLECTIONS TO PROCESS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(observations.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. If nothing is stable enough, do not call the tool.`;
+	const promptCapture = {
+		system: REFLECTOR_SYSTEM,
+		user: userText,
+	};
 	const prompts: Message[] = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
 	const context: AgentContext = { systemPrompt: REFLECTOR_SYSTEM, messages: [], tools: [recordReflections as AgentTool<any>] };
 	const reasoning = (model as { reasoning?: unknown }).reasoning;
@@ -155,10 +169,12 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	const streamFn = args.streamFn ?? bridgeStreamFn;
 	const stream = loop(prompts, context, config, signal, streamFn);
 	let agentError: string | undefined;
+	let transcript: TranscriptTurn[] = [];
 	for await (const event of stream) {
 		// Tool execution collects records.
 		if (event.type === "agent_end") {
 			const msgs = ((event as any).messages || []) as Array<{ stopReason?: string; errorMessage?: string }>;
+			transcript = (msgs as any[]).map(messageToTranscriptTurn);
 			const lastMsg = msgs[msgs.length - 1];
 			if (lastMsg?.stopReason === "error") {
 				agentError = lastMsg.errorMessage ?? "Unknown API error";
@@ -167,7 +183,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	}
 	await stream.result();
 	if (agentError && accumulated.size === 0) throw new Error(`Reflector API error: ${agentError}`);
-	return accumulated.size > 0 ? Array.from(accumulated.values()) : undefined;
+	if (accumulated.size === 0) return undefined;
+	return { reflections: Array.from(accumulated.values()), prompt: promptCapture, transcript };
 }
 
 export function observationToReflectorLine(

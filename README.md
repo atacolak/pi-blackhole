@@ -1,6 +1,20 @@
 # pi-blackhole
 
-
+> [!IMPORTANT]
+> **Blackhole is the default compaction engine** (`compactionEngine: "blackhole"`, `compaction: "auto"`). Auto-compaction fires at the configured threshold using blackhole's pipeline — both auto-trigger and Pi's `/compact` command use it. No additional setup needed. To work automatically, blackhole needs to register its hook so it overrides /compact with the `blackhole` compaction engine. Opting out or opting for manual compaction with blackhole can be done as below:
+>
+> | Setting | Auto-trigger after threshold | `/compact` (Pi built-in) |
+> |---|---|---|
+> | `"auto"` + `"blackhole"` (default) | blackhole handles ✓ | blackhole handles |
+> | `"auto"` + `"pi-default"` | Pi handles | Pi handles |
+> | `"manual"` + any | skipped | Pi handles ✓ |
+> | `"off"` + any | skipped (Pi handles) | Pi handles ✓ |
+>
+> The `/blackhole` command always uses blackhole's pipeline regardless of settings.
+>
+> **Upgrading from an older version?** This version replaces legacy keys (`passive`, `noAutoCompact`, `overrideDefaultCompaction`) with `compaction`, `compactionEngine`, and `tailBehavior`. Automatic migration runs at startup — old configs continue to work. Best effort was made to preserve existing behavior, but review [`MIGRATION-GUIDE.md`](MIGRATION-GUIDE.md) if something behaves differently.
+>
+> See [`CONFIG.md`](CONFIG.md) for the full reference.
 
 **Algorithmic compaction + session-aware observational memory for [Pi](https://github.com/badlogic/pi-mono) — in one unified extension.**
 
@@ -9,32 +23,6 @@ Blackhole merges the best ideas from [pi-vcc](https://github.com/sting8k/pi-vcc)
 > **Why this exists:** I liked both extensions but they fought each other — OM hooked into Pi's default compaction and blocked vcc from working. So I merged them, made them share a single hook and output, and added everything both were missing: fallback chains, cooldowns, a memory toggle, and a manual mode for people who want to control when context gets compressed.
 >
 > The codebase has since diverged heavily from both upstreams, but tries to keep up-to-date with any fixes from them.
-
-## cogito — epistemic kind system
-
-> the observer now tags every observation with an **epistemic kind**: `objective` (grounded in tool output), `intentional` (user assertions/goals), or `reflexive` (model's own reasoning). the reflector uses this hierarchy to never build factual memory on reflexive-only evidence. this fixes the provenance failure where the pipeline would crystallize the model's self-talk as if it were verified fact.
-
-**why this matters:** the original pipeline treated all observations as equal. a model saying "i think X" carried the same weight as a `git diff` output. the reflector would happily build reflections on the model's own speculation, creating a closed loop — the model remembers what it thought it remembered, not what actually happened. `cogito` breaks that loop with a three-tier epistemic filter integrated at the source.
-
-### changes
-
-**`src/om/ledger/types.ts`** — added `ObservationKind` union type (`objective | reflexive | intentional`) and optional `kind` field on `Observation`. backward-compatible — old observations without kind render without it.
-
-**`src/om/ledger/render-summary.ts`** — `observationToSummaryLine` includes `[kind]` in the formatted line so the reflector and all downstream rendering sees the epistemic label.
-
-**`src/om/agents/observer/agent.ts`** — `kind` field in `RecordObservationsSchema` (required from the model), passed through to the `Observation` object on construction.
-
-**`src/om/agents/observer/prompts.ts`** — epistemic classification instructions with examples and a dominance rule: tool results > user messages > assistant thinking. the model is told to derive kind from the source entry role labels it already sees.
-
-**`src/om/agents/reflector/prompts.ts`** — epistemic kind hierarchy in the decision procedure: prefer objective and intentional as reflection support; reject any reflection whose only support is reflexive observations. stops the pipeline from treating the model's self-talk as fact.
-
-**`src/om/run-artifact.ts`** — new file. `kind` serialized in observer.json artifacts so the bh CLI and external tooling can filter by epistemic kind.
-
-### also fixed
-
-**`src/om/consolidation.ts`** — dropper infinite-loop bug. when the observation pool was well under budget, the dropper would trigger repeatedly without advancing its coverage marker, flooding the session log with no-op drop runs. fix: write an explicit empty coverage marker (`observationIds: []`) when the dropper finds nothing to prune, advancing the watermark and preventing re-trigger.
-
-**`src/core/summarize.ts`** — `stripRecallNote` fix. the compaction note at end of vcc summaries was being mangled by the 120-char line wrapper, making exact-string-match stripping fail. added a fallback that searches for the opening sentence of the recall note and strips the wrapped variant.
 
 📖 See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 ⚙️ See [`CONFIG.md`](CONFIG.md) for the full configuration reference.
@@ -303,7 +291,6 @@ Everything else has sensible defaults.
 | `observationsPoolTargetTokens` | `10000` | Target size dropper aims for after pruning (derived: half of pool max) |
 | `reflectorInputMaxTokens` | `80000` | Max reflector input budget |
 | `dropperInputMaxTokens` | `80000` | Max dropper input budget |
-| `dropperPressureThreshold` | `0.70` | Fraction of `reflectorInputMaxTokens` at which dropper runs even without new data (pressure relief valve) |
 | `agentMaxTurns` | `16` | Max agent-loop turns per worker per run |
 | `debug` | `false` | Pre-compaction snapshot to `/tmp/pi-blackhole-debug.json` |
 | `debugLog` | `false` | Continuous JSONL debug log to `~/.pi/agent/pi-blackhole/debug.ndjson` |
@@ -326,8 +313,7 @@ Paste the appropriate block into your config to match your main session model's 
   "observerPreambleMaxTokens": 0,
   "observationsPoolMaxTokens": 8000,
   "reflectorInputMaxTokens": 30000,
-  "dropperInputMaxTokens": 30000,
-  "dropperPressureThreshold": 0.70
+  "dropperInputMaxTokens": 30000
 }
 ```
 
@@ -344,8 +330,7 @@ These are the built-in defaults. If you reset your config, these are what you ge
   "observerPreambleMaxTokens": 0,
   "observationsPoolMaxTokens": 20000,
   "reflectorInputMaxTokens": 80000,
-  "dropperInputMaxTokens": 80000,
-  "dropperPressureThreshold": 0.70
+  "dropperInputMaxTokens": 80000
 }
 ```
 
@@ -360,8 +345,7 @@ These are the built-in defaults. If you reset your config, these are what you ge
   "observerPreambleMaxTokens": 0,
   "observationsPoolMaxTokens": 40000,
   "reflectorInputMaxTokens": 160000,
-  "dropperInputMaxTokens": 160000,
-  "dropperPressureThreshold": 0.70
+  "dropperInputMaxTokens": 160000
 }
 ```
 

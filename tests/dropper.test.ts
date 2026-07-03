@@ -190,7 +190,7 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-1", { ids: ["aaaaaaaaaaaa", "missing", "bbbbbbbbbbbb"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(expect.objectContaining({ dropIds: ["aaaaaaaaaaaa"] }));
 	});
 
 	it("returns critical proposed ids when they are the selected valid candidates", async () => {
@@ -198,7 +198,7 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-1", { ids: ["missing", "cccccccccccc"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["cccccccccccc"]);
+		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(expect.objectContaining({ dropIds: ["cccccccccccc"] }));
 	});
 
 	it("returns undefined when only invalid ids are proposed", async () => {
@@ -215,7 +215,7 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-2", { ids: ["bbbbbbbbbbbb", "aaaaaaaaaaaa"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(expect.objectContaining({ dropIds: ["aaaaaaaaaaaa"] }));
 	});
 
 	it("returns undefined when no tool call drops observations", async () => {

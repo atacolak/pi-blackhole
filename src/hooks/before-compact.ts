@@ -209,18 +209,19 @@ export function buildOwnCut(
 
   if (cutIdx <= 0) {
     // Single user prompt scenario (or no user at all).
-    // Compact EVERYTHING and keep no tail. This handles both:
-    //  - Single user prompt at index 0: compact all, fresh start after summary
-    //  - No user message at all (e.g., long assistant/tool chain): still compact
-    //    to recover from context overflow rather than cancelling and leaving
-    //    the session unrecoverable.
-    // firstKeptEntryId="" is a sentinel: pi-core's buildSessionContext won't match it
-    // (so 0 kept from pre-compaction), and next buildOwnCut triggers orphan recovery.
+    // Keep the entire tail visible so the last assistant response doesn't
+    // vanish from the TUI.  Compact only when there's a meaningful
+    // amount of chat to collapse (cutIdx > 0).
+    // No user at all: still bail — no anchor to compact against.
+    if (liveMessages.length === 0 || liveMessages[0].message.role !== "user") {
+      return { ok: false, reason: "too_few_live_messages" };
+    }
+    // Single user prompt: keep everything visible.  Nothing to compact.
     return {
       ok: true,
-      messages: liveMessages.map((e) => e.message),
-      firstKeptEntryId: "",
-      compactAll: true,
+      messages: [],
+      firstKeptEntryId: liveMessages[0].entry.id,
+      compactAll: false,
     };
   }
 
@@ -455,13 +456,17 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     // ── Inject observational-memory content ───────────────────────────
     let omContent: string;
     let omDetails: Record<string, unknown> | undefined;
+    let projection: ReturnType<typeof buildCompactionProjection> | undefined;
     trace("before_compact.om_injection", { memoryEnabled: omRuntime.config.memory !== false });
     if (omRuntime.config.memory !== false) {
-      const projection = buildCompactionProjection(
-      branchEntries as any[],
-      firstKeptEntryId,
-      { observationsPoolMaxTokens: omRuntime.config.observationsPoolMaxTokens },
-    );
+      projection = buildCompactionProjection(
+        branchEntries as any[],
+        firstKeptEntryId,
+        {
+          observationsPoolMaxTokens: omRuntime.config.observationsPoolMaxTokens,
+          fullFoldAlways: omRuntime.config.fullFoldAlways,
+        },
+      );
       omContent = renderSummary(projection.reflections, projection.observations);
       omDetails = projection.details;
     } else {

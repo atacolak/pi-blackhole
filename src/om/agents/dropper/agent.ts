@@ -14,6 +14,7 @@ import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../ledger/index.js";
+import { messageToTranscriptTurn, type TranscriptTurn } from "../../run-artifact.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
 import {
 	REFLECTION_COVERAGE_DROP_RANK,
@@ -160,7 +161,16 @@ export function selectDropCandidates(
 		.map((candidate) => candidate.id);
 }
 
-export async function runDropper(args: RunDropperArgs): Promise<string[] | undefined> {
+export interface DropperResult {
+	dropIds: string[];
+	prompt: {
+		system: string;
+		user: string;
+	};
+	transcript?: TranscriptTurn[];
+}
+
+export async function runDropper(args: RunDropperArgs): Promise<DropperResult | undefined> {
 	const { model, apiKey, headers, reflections, observations, budgetTokens, signal } = args;
 	if (observations.length === 0) return undefined;
 
@@ -269,6 +279,10 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 		: '';
 
 	const userText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\n${existingObservationsContext}NEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nMaximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}.\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
+	const promptCapture = {
+		system: DROPPER_SYSTEM,
+		user: userText,
+	};
 	const prompts: Message[] = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
 	const context: AgentContext = { systemPrompt: DROPPER_SYSTEM, messages: [], tools: [dropObservations as AgentTool<any>] };
 	const reasoning = (model as { reasoning?: unknown }).reasoning;
@@ -292,10 +306,12 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	const streamFn = args.streamFn ?? bridgeStreamFn;
 	const stream = loop(prompts, context, config, signal, streamFn);
 	let agentError: string | undefined;
+	let transcript: TranscriptTurn[] = [];
 	for await (const event of stream) {
 		// Tool execution collects candidate ids.
 		if (event.type === "agent_end") {
 			const msgs = ((event as any).messages || []) as Array<{ stopReason?: string; errorMessage?: string }>;
+			transcript = (msgs as any[]).map(messageToTranscriptTurn);
 			const lastMsg = msgs[msgs.length - 1];
 			if (lastMsg?.stopReason === "error") {
 				agentError = lastMsg.errorMessage ?? "Unknown API error";
@@ -327,5 +343,5 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 		selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(droppedIds, observations, coverageById),
 		maxDropsAllowed,
 	});
-	return droppedIds.length > 0 ? droppedIds : undefined;
+	return droppedIds.length > 0 ? { dropIds: droppedIds, prompt: promptCapture, transcript } : undefined;
 }

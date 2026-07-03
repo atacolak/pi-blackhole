@@ -22,6 +22,29 @@ import { serializeSourceAddressedBranchEntries } from "./serialize.js";
 
 /** Fixed overhead for system prompt, tool definitions, and turn scaffold in context window pre-check. */
 const AGENT_LOOP_RESERVE = 8_000;
+
+/** Belt run counters — tracked per process (reset on reload). */
+let gObserverRunIndex = 0;
+let gReflectorRunIndex = 0;
+let gDropperRunIndex = 0;
+
+function artifactPath(cwd: string | undefined, sessionId: string, timestamp: string, stage: string): string {
+	if (!cwd) return "";
+	const safeId = sessionId.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64);
+	const ts = timestamp.replace(/[:.]/g, "-");
+	return `${cwd}/.pi/blackhole/runs/${safeId}/${ts}-${stage}.json`;
+}
+
+function buildSourceEntryTypes(entries: Entry[], sourceIds: string[]): Record<string, string> {
+	const entryMap = new Map<string, string>();
+	for (const e of entries) entryMap.set(e.id, e.type);
+	const result: Record<string, string> = {};
+	for (const id of sourceIds) {
+		const t = entryMap.get(id);
+		if (t) result[id] = t;
+	}
+	return result;
+}
 import {
 	readPendingState,
 	savePendingObservation,
@@ -151,7 +174,6 @@ function mergeReflections(existing: Reflection[], additional: Reflection[]): Ref
 }
 
 
-
 /**
  * Extract all pending observations from accumulated batches that were recorded
  * after a given coverage ID (e.g., the last reflection or drop coverage ID).
@@ -179,148 +201,10 @@ function pendingObservationsCreatedAfter(
 	return newObs;
 }
 
-/** Cursor-aware stage-due check.  Uses cursors when available; falls back to
- *  legacy coverage markers when cursors are absent (cold start, fork recovery).
- *
- *  In compaction: "manual" mode, the branch has no OM markers — observations
- *  live in the per‑session pending file.  `pending` provides the pool fullness
- *  and new‑data visibility that the reflector/dropper checks need. */
-export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: PendingOMState): boolean {
-	const config = runtime.config;
-	const cursors = runtime.cursors ?? {};
-
-	// ── Observer ──────────────────────────────────────────────────────────
-	const observerDue = (() => {
-		const cursor = cursors.observer;
-		if (!cursor) {
-			return rawTokensSinceObservationCoverage(entries) >= config.observeAfterTokens;
-		}
-		const idx = entryIndexForId(entries, cursor.entryId);
-		const tokensSince = idx >= 0
-			? rawTokensAfterIndex(entries, idx)
-			: rawTokensSinceObservationCoverage(entries);
-		return tokensSince >= config.observeAfterTokens;
-	})();
-
-	// ── Reflector ─────────────────────────────────────────────────────────
-	const reflectorDue = (() => {
-		const cursor = cursors.reflector;
-		if (!cursor) {
-			return rawTokensSinceReflectionCoverage(entries) >= config.reflectAfterTokens;
-		}
-		const idx = entryIndexForId(entries, cursor.entryId);
-		if (idx < 0) {
-			return rawTokensSinceReflectionCoverage(entries) >= config.reflectAfterTokens;
-		}
-		// Must have enough accumulated tokens before considering reflector
-		const tokensSince = rawTokensAfterIndex(entries, idx);
-		if (tokensSince < config.reflectAfterTokens) {
-			return false;
-		}
-		// Check for new observation batches after the cursor
-		for (let i = idx + 1; i < entries.length; i++) {
-			const e = entries[i];
-			if (e.type === "custom" && e.customType === OM_OBSERVATIONS_RECORDED) {
-				// Skip if this marker's coversUpToId is at or before the cursor
-				// — data it covers was already processed.
-				const markerCoversUpTo: string | undefined = (e as any).data?.coversUpToId;
-				if (markerCoversUpTo) {
-					const markerCoversIdx = entryIndexForId(entries, markerCoversUpTo);
-					if (markerCoversIdx >= 0 && markerCoversIdx <= idx) continue;
-				}
-				return true;
-			}
-		}
-		// In manual mode, also check pending observation batches that arrived
-		// after the cursor (since branch has no OM markers).
-		if (pending) {
-			const pendingBatches = pending.observationBatches ?? [];
-			for (const batch of pendingBatches) {
-				if (batch.coversUpToId) {
-					const batchIdx = entryIndexForId(entries, batch.coversUpToId);
-					if (batchIdx >= 0 && batchIdx > idx) return true;
-				}
-			}
-		}
-		return false;
-	})();
-
-	// ── Dropper ───────────────────────────────────────────────────────────
-	// Short‑circuit: only compute dropperDue when observer and reflector are
-	// both not due — if either is due, the pipeline launches anyway.
-	const dropperDue = observerDue || reflectorDue ? false : (() => {
-		// Compute active observation pool tokens (branch + pending in manual mode)
-		const folded = foldLedger(entries);
-		let poolTokens = folded.activeObservations.reduce(
-			(s: number, o: Observation) => s + (o.tokenCount ?? 0),
-			0,
-		);
-		// In manual mode, include pending observation batches
-		if (pending) {
-			const pendingBatches = pending.observationBatches ?? [];
-			for (const batch of pendingBatches) {
-				poolTokens += ((batch.data as any)?.observations ?? []).reduce(
-					(s: number, o: any) => s + (o.tokenCount ?? 0), 0,
-				);
-			}
-		}
-		const fullnessVsPool = config.observationsPoolMaxTokens > 0
-			? poolTokens / config.observationsPoolMaxTokens
-			: 0;
-
-		// Must have at least 10% fullness to consider dropper
-		if (fullnessVsPool < 0.10) return false;
-
-		// Pressure check: pool ≥ threshold × reflectorInputMaxTokens
-		const pressure = poolTokens >= config.dropperPressureThreshold * config.reflectorInputMaxTokens;
-		if (pressure) return true;
-
-		// New data check: new obs or ref batches after dropper cursor
-		const cursor = cursors.dropper;
-		if (!cursor) {
-			// In manual mode, pending batches are the only source of new‑data
-			// visibility (branch has no OM markers).
-			const hasPendingNewData = pending
-				? (pending.observationBatches?.length ?? 0) > 0 || (pending.reflectionBatches?.length ?? 0) > 0
-				: false;
-			if (hasPendingNewData) return true;
-			return rawTokensSinceDropCoverage(entries) >= config.reflectAfterTokens;
-		}
-		const idx = entryIndexForId(entries, cursor.entryId);
-		if (idx < 0) {
-			return rawTokensSinceDropCoverage(entries) >= config.reflectAfterTokens;
-		}
-		// Must have enough accumulated tokens before considering dropper
-		const tokensSince = rawTokensAfterIndex(entries, idx);
-		if (tokensSince < config.reflectAfterTokens) {
-			return false;
-		}
-		for (let i = idx + 1; i < entries.length; i++) {
-			const e = entries[i];
-			if (e.type === "custom" && (e.customType === OM_OBSERVATIONS_RECORDED || e.customType === OM_REFLECTIONS_RECORDED)) {
-				const markerCoversUpTo: string | undefined = (e as any).data?.coversUpToId;
-				if (markerCoversUpTo) {
-					const markerCoversIdx = entryIndexForId(entries, markerCoversUpTo);
-					if (markerCoversIdx >= 0 && markerCoversIdx <= idx) continue;
-				}
-				return true;
-			}
-		}
-		// In manual mode, also check pending batches after the cursor
-		if (pending) {
-			const pendingObs = pending.observationBatches ?? [];
-			const pendingRef = pending.reflectionBatches ?? [];
-			for (const batch of [...pendingObs, ...pendingRef]) {
-				if (batch.coversUpToId) {
-					const batchIdx = entryIndexForId(entries, batch.coversUpToId);
-					if (batchIdx >= 0 && batchIdx > idx) return true;
-				}
-			}
-		}
-		return false;
-	})();
-
-	return observerDue || reflectorDue || dropperDue;
+function anyStageDue(entries: Entry[], runtime: Runtime): boolean {
+	return rawTokensSinceObservationCoverage(entries) >= runtime.config.observeAfterTokens
+		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens
+		|| rawTokensSinceDropCoverage(entries) >= runtime.config.reflectAfterTokens;
 }
 
 function stageModelConfig(runtime: Runtime, stage: "observer" | "reflector" | "dropper"): ConfiguredModel | undefined {
@@ -384,43 +268,6 @@ export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime)
 	pi.on("turn_end", launch);
 }
 
-/** Validate cursors against the current branch.  If a cursor's entry ID no longer
- *  exists in the branch (fork, navigation, compaction), fall back to the best
- *  available coverage marker for that stage. */
-function validateCursors(entries: Entry[], runtime: Runtime): void {
-	const cursors = runtime.cursors ?? {};
-
-	// Observer: fall back to latest OM_OBSERVATIONS_RECORDED marker
-	if (cursors.observer && entryIndexForId(entries, cursors.observer.entryId) < 0) {
-		const markerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-		if (markerId) {
-			cursors.observer = { entryId: markerId, state: "initial" };
-		} else {
-			delete cursors.observer;
-		}
-	}
-
-	// Reflector: fall back to latest OM_REFLECTIONS_RECORDED marker
-	if (cursors.reflector && entryIndexForId(entries, cursors.reflector.entryId) < 0) {
-		const markerId = latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
-		if (markerId) {
-			cursors.reflector = { entryId: markerId, state: "initial" };
-		} else {
-			delete cursors.reflector;
-		}
-	}
-
-	// Dropper: fall back to latest OM_OBSERVATIONS_DROPPED marker
-	if (cursors.dropper && entryIndexForId(entries, cursors.dropper.entryId) < 0) {
-		const markerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_DROPPED);
-		if (markerId) {
-			cursors.dropper = { entryId: markerId, state: "initial" };
-		} else {
-			delete cursors.dropper;
-		}
-	}
-}
-
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.memory === false) return;
@@ -432,28 +279,8 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 	if (runtime.consolidationInFlight) return;
 	if (runtime.isConsolidationRetryGated()) return;
 
-	// Load and validate cursors from pending file (once per session; re-load on fork)
-	const sessionId = ctx.sessionManager.getSessionId();
-	if (runtime.cursorsLoadedSessionId !== sessionId) {
-		if (typeof runtime.loadCursorsFromPending === "function") {
-			runtime.loadCursorsFromPending(sessionId);
-		}
-		const entries = ctx.sessionManager.getBranch() as Entry[];
-		validateCursors(entries, runtime);
-		runtime.cursorsLoadedSessionId = sessionId;
-		const c = runtime.cursors ?? {};
-		debugLog("cursor.loaded", {
-			observer: c.observer ?? null,
-			reflector: c.reflector ?? null,
-			dropper: c.dropper ?? null,
-		});
-	}
-
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	// In manual mode, the branch has no OM markers — pending state provides
-	// pool fullness and new‑data visibility for reflector/dropper checks.
-	const pending = runtime.config.noAutoCompact ? readPendingState(sessionId) : undefined;
-	if (!anyStageDue(entries, runtime, pending)) return;
+	if (!anyStageDue(entries, runtime)) return;
 
 	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 	const consolidationCtx: ConsolidationCtx = {
@@ -479,6 +306,7 @@ export async function runConsolidationPipeline(
 ): Promise<void> {
 	const resolveModel = makeModelResolver(runtime, ctx);
 
+	// ── Observer stage ──
 	runtime.consolidationPhase = "observer";
 	runtime.failedInCycle.clear();
 	runtime.resolveFailureNotified = false;
@@ -510,17 +338,8 @@ export async function runConsolidationPipeline(
 	} catch (error) {
 		debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
 	}
-
-	// Flush cursors to pending file after all stages complete (non‑blocking)
-	const sessionId = ctx.sessionManager.getSessionId();
-	runtime.scheduleCursorFlush(sessionId);
-	const c = runtime.cursors ?? {};
-	debugLog("cursor.saved", {
-		observer: c.observer ?? null,
-		reflector: c.reflector ?? null,
-		dropper: c.dropper ?? null,
-	});
 }
+
 
 // ── Observer stage (with fallback) ──────────────────────────────────────────
 
@@ -531,27 +350,14 @@ async function runObserverStage(
 	resolveModel: (stage: "observer") => Promise<ResolvedModel | undefined>,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const sessionId = ctx.sessionManager.getSessionId();
+	const tokens = rawTokensSinceObservationCoverage(entries);
+	if (tokens < runtime.config.observeAfterTokens) return "continue";
 
-	// Determine start index: cursor takes priority, fall back to coverage markers
-	const observerCursor = runtime.getCursor("observer");
-	let effectiveStart: number;
-	if (observerCursor) {
-		const cursorIdx = entryIndexForId(entries, observerCursor.entryId);
-		effectiveStart = cursorIdx >= 0 ? cursorIdx : latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-	} else {
-		const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-		effectiveStart = lastCoverageIdx >= 0 ? lastCoverageIdx : findLastCompactionIndex(entries);
-	}
-
-	const tokens = effectiveStart >= 0 ? rawTokensAfterIndex(entries, effectiveStart) : 0;
-	if (tokens < runtime.config.observeAfterTokens) {
-		// Not due — advance cursor to last source entry so we don't re-check immediately
-		const lastSourceId = [...entries].reverse().find((e: Entry) => isSourceEntry(e))?.id;
-		if (lastSourceId) runtime.advanceCursor("observer", lastSourceId, "not_due");
-		return "continue";
-	}
-
+	const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+	// Mid-session cold start: when no coverage marker exists (e.g., after compaction
+	// consumed the markers), fall back to the last compaction as the cutoff instead
+	// of processing everything including the compaction summary.
+	const effectiveStart = lastCoverageIdx >= 0 ? lastCoverageIdx : findLastCompactionIndex(entries);
 	let chunkEntries = sourceEntriesAfter(entries, effectiveStart);
 
 	// Cap observer input to observerChunkMaxTokens (newest-to-oldest)
@@ -564,9 +370,12 @@ async function runObserverStage(
 	const coversUpToId = chunkEntries.at(-1)?.id;
 	if (!coversUpToId) return "continue";
 
-	const { text: chunk, sourceEntryIds } = serializeSourceAddressedBranchEntries(chunkEntries);
-	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
+	const { text: baseChunk, sourceEntryIds } = serializeSourceAddressedBranchEntries(chunkEntries);
+	if (!baseChunk.trim() || sourceEntryIds.length === 0) return "continue";
+	const chunk = baseChunk;
 	const chunkTokens = Math.ceil(chunk.length / 4);
+
+	const sessionId = ctx.sessionManager.getSessionId();
 
 	const memory = fullProjection(entries);
 	let priorReflections = memory.reflections.map(reflectionToSummaryLine);
@@ -652,14 +461,21 @@ async function runObserverStage(
 			});
 
 			if (result.observations && result.observations.length > 0) {
-				const data = buildObservationsRecordedData(result.observations, coversUpToId);
-				if (!data) { runtime.advanceCursor("observer", coversUpToId, "empty"); return "continue"; }
-				debugLog("observer.records", { count: result.observations.length, observationTokens: result.observations.reduce((s: number, o: any) => s + o.tokenCount, 0), coversUpToId });
-				writeRunArtifact(ctx.cwd, sessionId, observerArtifact(
+				gObserverRunIndex++;
+				const artifact = observerArtifact(
 					{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 					chunkTokens, priorReflections.length, priorObservations.length,
 					sourceEntryIds.length, result.observations,
-				));
+					{ systemPrompt: result.prompt.system, userPrompt: result.prompt.user, coversUpToId, transcript: result.transcript },
+				);
+				writeRunArtifact(ctx.cwd, sessionId, artifact);
+				const data = buildObservationsRecordedData(result.observations, coversUpToId, {
+					runIndex: gObserverRunIndex,
+					blackholeArtifact: artifactPath(ctx.cwd, sessionId, artifact.timestamp, "observer"),
+					sourceEntryTypes: buildSourceEntryTypes(chunkEntries, sourceEntryIds),
+				});
+				if (!data) return "continue";
+				debugLog("observer.records", { count: result.observations.length, observationTokens: result.observations.reduce((s: number, o: any) => s + o.tokenCount, 0), coversUpToId });
 				if (runtime.config.noAutoCompact) {
 					savePendingObservation(sessionId, { coversUpToId, data });
 					debugLog("observer.pending", { count: result.observations.length, coversUpToId, sessionId });
@@ -667,7 +483,6 @@ async function runObserverStage(
 					appendEntry(pi, OM_OBSERVATIONS_RECORDED, data);
 					debugLog("observer.appended", { count: result.observations.length, coversUpToId });
 				}
-				runtime.advanceCursor("observer", coversUpToId, "recorded");
 				if (ctx.hasUI) ctx.ui?.notify(`Observational memory: ${result.observations.length} observation${result.observations.length === 1 ? "" : "s"} recorded`, "info");
 				return "continue";
 			}
@@ -694,9 +509,9 @@ async function runObserverStage(
 			writeRunArtifact(ctx.cwd, sessionId, observerArtifact(
 				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 				chunkTokens, priorReflections.length, priorObservations.length,
-				sourceEntryIds.length, [], reasonLabel,
+				sourceEntryIds.length, [],
+				{ emptyReason: reasonLabel, systemPrompt: result.prompt.system, userPrompt: result.prompt.user, coversUpToId, transcript: result.transcript },
 			));
-			runtime.advanceCursor("observer", coversUpToId, "empty");
 			if (ctx.hasUI) ctx.ui?.notify(`Observational memory: no observations — ${reasonLabel}`, reasonLevel);
 			return "continue";
 		} catch (error) {
@@ -731,15 +546,15 @@ async function runReflectorStage(
 		const pending = readPendingState(sessionId);
 		// Check any accumulated batch for unprocessed observations, not just the latest
 		const hasPendingObs = (pending.observationBatches ?? []).some((b: any) => (b.data as any)?.observations?.length);
-		if (!hasPendingObs) { runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "skipped"); return { outcome: "continue", sameRunReflections: [] }; }
+		if (!hasPendingObs) return { outcome: "continue", sameRunReflections: [] };
 		observationCoverageId = pending.observation?.coversUpToId;
 		if (pending.reflection?.coversUpToId) {
 			const obsIdx = entryIndexForId(entries, pending.observation?.coversUpToId ?? "");
 			const refIdx = entryIndexForId(entries, pending.reflection.coversUpToId);
-			if (obsIdx >= 0 && refIdx >= 0 && obsIdx <= refIdx) { runtime.advanceCursor("reflector", pending.reflection.coversUpToId, "skipped"); return { outcome: "continue", sameRunReflections: [] }; }
+			if (obsIdx >= 0 && refIdx >= 0 && obsIdx <= refIdx) return { outcome: "continue", sameRunReflections: [] };
 			if (refIdx >= 0) {
 				reflectionTokens = rawTokensAfterIndex(entries, refIdx);
-				if (reflectionTokens < runtime.config.reflectAfterTokens) { runtime.advanceCursor("reflector", pending.reflection.coversUpToId, "not_due"); return { outcome: "continue", sameRunReflections: [] }; }
+				if (reflectionTokens < runtime.config.reflectAfterTokens) return { outcome: "continue", sameRunReflections: [] };
 			} else {
 				reflectionTokens = rawTokensSinceObservationCoverage(entries);
 			}
@@ -748,9 +563,9 @@ async function runReflectorStage(
 		}
 	} else {
 		reflectionTokens = rawTokensSinceReflectionCoverage(entries);
-		if (reflectionTokens < runtime.config.reflectAfterTokens) { runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "not_due"); return { outcome: "continue", sameRunReflections: [] }; }
+		if (reflectionTokens < runtime.config.reflectAfterTokens) return { outcome: "continue", sameRunReflections: [] };
 		observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-		if (!observationCoverageId) { runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "skipped"); return { outcome: "continue", sameRunReflections: [] }; }
+		if (!observationCoverageId) return { outcome: "continue", sameRunReflections: [] };
 	}
 
 	for (let attempt = 0; attempt < MAX_STAGE_ATTEMPTS; attempt++) {
@@ -779,7 +594,6 @@ async function runReflectorStage(
 				if (idx >= 0) effectiveReflectionTokens = rawTokensAfterIndex(entries, idx);
 			}
 		}
-		debugLog("reflector.start", { tokens: effectiveReflectionTokens, inputTokens: reflectorInputTokens, newObsCount: newObservations.length, newRefCount: newReflections.length });
 		if (ctx.hasUI) ctx.ui?.notify(`Observational memory: reflector running (~${effectiveReflectionTokens.toLocaleString()} tokens accumulated, ~${reflectorInputTokens.toLocaleString()}-token input)`, "info");
 
 		// Resolve thinking level for the specific model (fallbacks may have their own thinking config)
@@ -815,7 +629,7 @@ async function runReflectorStage(
 				Math.floor(runtime.config.reflectorInputMaxTokens * 0.15),
 			);
 
-			const reflections = await runReflector({
+			const reflectorResult = await runReflector({
 				model: resolved.model as any,
 				apiKey: resolved.apiKey,
 				headers: resolved.headers,
@@ -827,34 +641,30 @@ async function runReflectorStage(
 				thinkingLevel: stageThinkingLevel(runtime, "reflector", stageModelForThinking),
 			});
 
-			if (!reflections || reflections.length === 0) {
-				runtime.advanceCursor("reflector", observationCoverageId ?? entries.at(-1)?.id ?? "unknown", "empty");
-				return { outcome: "continue", sameRunReflections: [] };
-			}
-			if (!observationCoverageId) {
-				runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "empty");
-				return { outcome: "continue", sameRunReflections: [] };
-			}
+			if (!reflectorResult || reflectorResult.reflections.length === 0) return { outcome: "continue", sameRunReflections: [] };
+			if (!observationCoverageId) return { outcome: "continue", sameRunReflections: [] };
 
-			writeRunArtifact(ctx.cwd, sessionId, reflectorArtifact(
+			gReflectorRunIndex++;
+			const reflArtifact = reflectorArtifact(
 				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
-				reflectionTokens, newObservations.length, newReflections.length, reflections,
-			));
+				reflectionTokens, newObservations.length, newReflections.length, reflectorResult.reflections,
+				{ systemPrompt: reflectorResult.prompt.system, userPrompt: reflectorResult.prompt.user, transcript: reflectorResult.transcript },
+			);
+			writeRunArtifact(ctx.cwd, sessionId, reflArtifact);
 
-			const data = buildReflectionsRecordedData(reflections, observationCoverageId);
-			if (!data) {
-				runtime.advanceCursor("reflector", observationCoverageId, "empty");
-				return { outcome: "continue", sameRunReflections: [] };
-			}
+			const data = buildReflectionsRecordedData(reflectorResult.reflections, observationCoverageId, {
+				runIndex: gReflectorRunIndex,
+				blackholeArtifact: artifactPath(ctx.cwd, sessionId, reflArtifact.timestamp, "reflector"),
+			});
+			if (!data) return { outcome: "continue", sameRunReflections: [] };
 			if (runtime.config.noAutoCompact) {
 				savePendingReflection(sessionId, { coversUpToId: data.coversUpToId, data });
 			} else {
 				appendEntry(pi, OM_REFLECTIONS_RECORDED, data);
 			}
-			runtime.advanceCursor("reflector", data.coversUpToId, "recorded");
 			return {
 				outcome: "continue",
-				sameRunReflections: reflections,
+				sameRunReflections: reflectorResult.reflections,
 				effectiveReflectionCoverageId: data.coversUpToId,
 			};
 		} catch (error) {
@@ -887,15 +697,15 @@ async function runDropperStage(
 		const pending = readPendingState(sessionId);
 		// Check any accumulated batch for unprocessed observations, not just the latest
 		const hasPendingObs = (pending.observationBatches ?? []).some((b: any) => (b.data as any)?.observations?.length);
-		if (!hasPendingObs) { runtime.advanceCursor("dropper", entries.at(-1)?.id ?? "unknown", "skipped"); return "continue"; }
+		if (!hasPendingObs) return "continue";
 		observationCoverageId = pending.observation?.coversUpToId;
 		if (pending.dropped?.coversUpToId) {
 			const obsIdx = entryIndexForId(entries, pending.observation?.coversUpToId ?? "");
 			const dropIdx = entryIndexForId(entries, pending.dropped.coversUpToId);
-			if (obsIdx >= 0 && dropIdx >= 0 && obsIdx <= dropIdx) { runtime.advanceCursor("dropper", pending.dropped.coversUpToId, "skipped"); return "continue"; }
+			if (obsIdx >= 0 && dropIdx >= 0 && obsIdx <= dropIdx) return "continue";
 			if (dropIdx >= 0) {
 				dropTokens = rawTokensAfterIndex(entries, dropIdx);
-				if (dropTokens < runtime.config.reflectAfterTokens) { runtime.advanceCursor("dropper", pending.dropped.coversUpToId, "not_due"); return "continue"; }
+				if (dropTokens < runtime.config.reflectAfterTokens) return "continue";
 			} else {
 				dropTokens = rawTokensSinceDropCoverage(entries);
 			}
@@ -904,9 +714,9 @@ async function runDropperStage(
 		}
 	} else {
 		dropTokens = rawTokensSinceDropCoverage(entries);
-		if (dropTokens < runtime.config.reflectAfterTokens) { runtime.advanceCursor("dropper", entries.at(-1)?.id ?? "unknown", "not_due"); return "continue"; }
+		if (dropTokens < runtime.config.reflectAfterTokens) return "continue";
 		observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-		if (!observationCoverageId) { runtime.advanceCursor("dropper", entries.at(-1)?.id ?? "unknown", "skipped"); return "continue"; }
+		if (!observationCoverageId) return "continue";
 	}
 
 	for (let attempt = 0; attempt < MAX_STAGE_ATTEMPTS; attempt++) {
@@ -968,7 +778,7 @@ async function runDropperStage(
 				continue;
 			}
 
-			const droppedIds = await runDropper({
+			const dropResult = await runDropper({
 				model: resolved.model as any,
 				apiKey: resolved.apiKey,
 				headers: resolved.headers,
@@ -979,6 +789,7 @@ async function runDropperStage(
 				maxTurns: runtime.config.agentMaxTurns,
 				thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),
 			});
+			const droppedIds = dropResult?.dropIds;
 			const latestReflectionCoverageId = runtime.config.noAutoCompact
 				? pending?.reflection?.coversUpToId
 				: latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
@@ -987,33 +798,34 @@ async function runDropperStage(
 			const observationTokens = newObservations.reduce((s: number, o: any) => s + (o.tokenCount ?? 0), 0);
 			const dropFullness = observationTokens / (runtime.config.observationsPoolMaxTokens || 1);
 			const dropUrgency = dropFullness < 0.30 ? "low" : dropFullness < 0.60 ? "medium" : "high";
-			writeRunArtifact(ctx.cwd, sessionId, dropperArtifact(
+			gDropperRunIndex++;
+			const dropArtifact = dropperArtifact(
 				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 				dropTokens, newObservations.length, reflectionsForDropper.length,
 				observationTokens, runtime.config.observationsPoolMaxTokens,
 				droppedIds ?? undefined, dropFullness, dropUrgency,
-			));
-			const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
+				dropResult ? { systemPrompt: dropResult.prompt.system, userPrompt: dropResult.prompt.user, transcript: dropResult.transcript } : undefined,
+			);
+			writeRunArtifact(ctx.cwd, sessionId, dropArtifact);
+			const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId, {
+				runIndex: gDropperRunIndex,
+				blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper"),
+			}) : undefined;
 			if (data && coversUpToId) {
 				if (runtime.config.noAutoCompact) {
 					savePendingDropped(sessionId, { coversUpToId, data });
 				} else {
 					appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
 				}
-				runtime.advanceCursor("dropper", coversUpToId, "recorded");
 			} else if (coversUpToId && droppedIds && droppedIds.length === 0) {
 				// Coverage advancement: dropper ran clean — nothing needed pruning.
 				// Write empty marker so coverage advances, preventing infinite re-trigger
 				// when the pool is well under budget.
 				if (runtime.config.noAutoCompact) {
-					savePendingDropped(sessionId, { coversUpToId, data: { observationIds: [], coversUpToId } });
+					savePendingDropped(sessionId, { coversUpToId, data: { observationIds: [], coversUpToId, runIndex: gDropperRunIndex, blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper") } });
 				} else {
-					appendEntry(pi, OM_OBSERVATIONS_DROPPED, { observationIds: [], coversUpToId });
+					appendEntry(pi, OM_OBSERVATIONS_DROPPED, { observationIds: [], coversUpToId, runIndex: gDropperRunIndex, blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper") });
 				}
-				runtime.advanceCursor("dropper", coversUpToId, "recorded");
-			} else {
-				// No drops selected (maxDropsAllowed=0 or LLM returned no candidates)
-				runtime.advanceCursor("dropper", coversUpToId ?? observationCoverageId ?? entries.at(-1)?.id ?? "unknown", "empty");
 			}
 			return "continue";
 		} catch (error) {

@@ -154,45 +154,50 @@ export const compile = (input: CompileInput): string => {
   const blocks = filterNoise(normalize(input.messages));
   const data = buildSections({ blocks });
   const fresh = formatSummary(data);
-  // Strip any legacy RECALL_NOTE baked into prev summary (pre-fix format)
-  // so merge doesn't re-stack it inside the brief.
-  // Also strip OM content (## Reflections / ## Observations) from previous
-  // compactions — these are re-rendered fresh by the before-compact hook.
+  // Strip OM content FIRST (## Reflections / ## Observations + recall footer).
+  // This must happen before stripRecallNote because under the old order
+  // stripRecallNote would match RECALL_NOTE embedded before OM content and
+  // accidentally strip everything after it (including the OM section).
+  // After OM is removed, stripRecallNote only removes the trailing RECALL_NOTE
+  // from the VCC-only portion.
   let prev = input.previousSummary
-    ? stripRecallNote(input.previousSummary)
+    ? stripOMContent(input.previousSummary)
     : undefined;
-  prev = prev ? stripOMContent(prev) : undefined;
-  const merged = prev ? mergePrevious(prev, fresh) : fresh;
+  prev = prev ? stripRecallNote(prev) : undefined;
+  let merged = prev ? mergePrevious(prev, fresh) : fresh;
   if (!merged) return "";
-  return wrapLongLines(merged) + SEPARATOR + RECALL_NOTE;
+  // Strip any RECALL_NOTEs that survived from previous compactions embedded
+  // in the brief transcript before appending a fresh one.  (Previous
+  // stripRecallNote only removed the trailing note; merged briefs can carry
+  // earlier notes from deeply nested compaction cycles.)
+  merged = stripAllRecallNotes(merged);
+  return wrapLongLines(merged + SEPARATOR + RECALL_NOTE);
 };
 
 const stripRecallNote = (text: string): string => {
   // Remove trailing RECALL_NOTE (and any separators surrounding it) if present.
   // Handles both current format (---\n\nNOTE) and bare trailing NOTE.
-  // Also handles the wrapped variant (from pre-fix compactions where wrapLongLines
-  // broke the note across multiple lines). Uses a flexible regex that tolerates
-  // line breaks inserted by the 120-char line wrapper.
   const idx = text.lastIndexOf(RECALL_NOTE);
-  if (idx >= 0) {
-    return text.slice(0, idx).replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
-  }
-  // Fallback: handle wrapped variant from compactions before the wrapLongLines fix.
-  // The wrapped note has line breaks inserted at ~120-char boundaries, making
-  // exact string match impossible. Search for the opening sentence instead.
-  const opening = "The conversation before this point has been compacted into the summary";
-  const wrappedIdx = text.indexOf(opening);
-  if (wrappedIdx >= 0) {
-    // Check that this looks like a compaction boundary separator + RECALL_NOTE
-    // (at the end of the text, possibly preceded by ---)
-    const before = text.slice(0, wrappedIdx).trimEnd();
-    // Only strip if it's at the end (within reason) — not mid-transcript
-    const after = text.slice(wrappedIdx);
-    if (after.length < 600 && text.length - wrappedIdx < text.length * 0.4) {
-      return before.replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
-    }
-  }
-  return text;
+  if (idx < 0) return text;
+  return text.slice(0, idx).replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
+};
+
+/**
+ * Remove every occurrence of RECALL_NOTE from the text along with any
+ * surrounding separator markers.  This is run on the merged summary before
+ * appending a fresh RECALL_NOTE, so no doubles survive across compactions.
+ *
+ * RECALL_NOTE may have been line-wrapped by `wrapLongLines` in a previous
+ * compaction, so we can't exact-match.  Instead, detect paragraphs that
+ * contain the key sentence "The conversation before this point has been
+ * compacted" and strip the whole paragraph block.
+ */
+const stripAllRecallNotes = (text: string): string => {
+  const key = "The conversation before this point has been compacted";
+  // Split on double-newline (paragraph boundaries)
+  const paragraphs = text.split(/\n\n+/);
+  const filtered = paragraphs.filter((p) => !p.includes(key));
+  return filtered.join("\n\n").trim();
 };
 
 /**

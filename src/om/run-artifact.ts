@@ -8,6 +8,17 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { Observation, Reflection } from "./ledger/types.js";
 
+export interface TranscriptTurn {
+  /** Role of the message sender. */
+  role: "user" | "assistant" | "toolResult";
+  /** Flattened text content, including thinking blocks prefixed with [thinking: ...]. */
+  text: string;
+  /** Tool call blocks if this is an assistant message with tool calls. */
+  toolCalls?: Array<{ name: string; args: unknown }>;
+  /** Tool name if this is a toolResult message. */
+  toolName?: string;
+}
+
 export interface StageArtifact {
   /** Consolidation stage name. */
   stage: "observer" | "reflector" | "dropper";
@@ -21,6 +32,67 @@ export interface StageArtifact {
   output: Record<string, unknown>;
   /** Wall-clock duration (ms). */
   durationMs?: number;
+  /**
+   * Full agent loop transcript — every message, thinking block, tool call,
+   * and tool result exchanged during the run. Each entry is a flattened
+   * representation of one AgentMessage from the loop.
+   */
+  transcript?: TranscriptTurn[];
+}
+
+/** Max characters per transcript entry's text field. Longer content gets truncated with a marker. */
+const TRANSCRIPT_TEXT_MAX = 50_000;
+
+/**
+ * Flatten an AgentMessage-like object into a TranscriptTurn for artifact storage.
+ * Extracts thinking blocks (prefixed), text content, tool calls, and tool results.
+ */
+export function messageToTranscriptTurn(msg: any): TranscriptTurn {
+  if (!msg || typeof msg !== "object") {
+    return { role: "assistant", text: "[invalid message]" };
+  }
+  const role = msg.role as string;
+  if (role === "toolResult" || role === "tool_result") {
+    const text = extractTextContent(msg.content);
+    const toolName = msg.toolName ?? (msg as any).tool_name ?? "unknown";
+    return { role: "toolResult", text: text.slice(0, TRANSCRIPT_TEXT_MAX), toolName };
+  }
+  if (role === "user") {
+    return { role: "user", text: extractTextContent(msg.content).slice(0, TRANSCRIPT_TEXT_MAX) };
+  }
+  // assistant — extract thinking blocks, text, and tool calls
+  const parts: string[] = [];
+  const toolCalls: Array<{ name: string; args: unknown }> = [];
+  const content = Array.isArray(msg.content) ? msg.content : [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "thinking") {
+      const thinking = typeof block.thinking === "string" ? block.thinking
+        : typeof block.signature === "string" ? "[redacted thinking]"
+        : "[unknown thinking]";
+      parts.push(`[thinking: ${thinking}]`);
+    } else if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    } else if (block.type === "toolCall" || block.type === "tool_use") {
+      const name = block.name ?? block.toolName ?? "unknown";
+      toolCalls.push({ name, args: block.args ?? block.arguments ?? {} });
+      parts.push(`[${name}(${JSON.stringify(block.args ?? block.arguments ?? {})})]`);
+    }
+  }
+  return {
+    role: "assistant",
+    text: parts.join("\n").slice(0, TRANSCRIPT_TEXT_MAX),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+  };
+}
+
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b: any) => b?.type === "text" && typeof b.text === "string")
+    .map((b: any) => b.text)
+    .join("\n");
 }
 
 function sanitizeSessionId(id: string): string {
@@ -66,9 +138,10 @@ export function observerArtifact(
     systemPrompt?: string;
     userPrompt?: string;
     coversUpToId?: string;
+    transcript?: TranscriptTurn[];
   },
 ): StageArtifact {
-  const { emptyReason, durationMs, systemPrompt, userPrompt, coversUpToId } = opts ?? {};
+  const { emptyReason, durationMs, systemPrompt, userPrompt, coversUpToId, transcript } = opts ?? {};
   return {
     stage: "observer",
     timestamp: new Date().toISOString(),
@@ -97,6 +170,7 @@ export function observerArtifact(
           })),
         },
     durationMs,
+    ...(transcript ? { transcript } : {}),
   };
 }
 
@@ -113,9 +187,10 @@ export function reflectorArtifact(
     durationMs?: number;
     systemPrompt?: string;
     userPrompt?: string;
+    transcript?: TranscriptTurn[];
   },
 ): StageArtifact {
-  const { durationMs, systemPrompt, userPrompt } = opts ?? {};
+  const { durationMs, systemPrompt, userPrompt, transcript } = opts ?? {};
   return {
     stage: "reflector",
     timestamp: new Date().toISOString(),
@@ -137,6 +212,7 @@ export function reflectorArtifact(
       })),
     },
     durationMs,
+    ...(transcript ? { transcript } : {}),
   };
 }
 
@@ -157,9 +233,10 @@ export function dropperArtifact(
     durationMs?: number;
     systemPrompt?: string;
     userPrompt?: string;
+    transcript?: TranscriptTurn[];
   },
 ): StageArtifact {
-  const { durationMs, systemPrompt, userPrompt } = opts ?? {};
+  const { durationMs, systemPrompt, userPrompt, transcript } = opts ?? {};
   return {
     stage: "dropper",
     timestamp: new Date().toISOString(),
@@ -181,5 +258,6 @@ export function dropperArtifact(
       keptCount: activeObservationCount - (droppedIds?.length ?? 0),
     },
     durationMs,
+    ...(transcript ? { transcript } : {}),
   };
 }

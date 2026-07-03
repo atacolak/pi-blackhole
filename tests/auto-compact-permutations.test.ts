@@ -311,13 +311,7 @@ describe("Auto-compact trigger: deferral and re-check paths", () => {
 	beforeEach(() => { vi.useFakeTimers(); });
 	afterEach(() => { vi.useRealTimers(); });
 
-	it("keeps waiting when agent is not idle (issue #31)", async () => {
-		// Issue #31: the original behavior was to bail after a single
-		// isIdle() === false check, which caused auto-compaction to never
-		// fire when async agent_end handlers (e.g. pi-rewind's checkpoint
-		// I/O) made isIdle() transiently false. The new contract is to keep
-		// compactInFlight = true and keep waiting until the agent truly
-		// settles (or the agent_start handler aborts).
+	it("defers when agent becomes busy between trigger and microtask", async () => {
 		const system = captureFullSystem({
 			noAutoCompact: false,
 			passive: false,
@@ -325,18 +319,18 @@ describe("Auto-compact trigger: deferral and re-check paths", () => {
 			overrideDefaultCompaction: true,
 		});
 
-		// Override isIdle to return false — trigger must NOT bail.
+		// Override isIdle to return false (agent busy)
 		system.ctx.isIdle = vi.fn(() => false);
 
 		system.fireAgentEnd(dueBranch);
 		await system.flushAll();
 
-		// compact has not been called (we're still waiting)
+		// Should NOT have called compact
 		expect(system.ctx.compact).not.toHaveBeenCalled();
-		// compactInFlight is STILL true — we are waiting, not bailed
-		expect(system.runtime.compactInFlight).toBe(true);
-		// No "deferred" notification — that was the buggy old behavior
-		expect(system.notifyCalls.some(n => n.msg.includes("compaction deferred"))).toBe(false);
+		// compactInFlight was reset by the deferral
+		expect(system.runtime.compactInFlight).toBe(false);
+		// Should show deferral notification
+		expect(system.notifyCalls.some(n => n.msg.includes("compaction deferred"))).toBe(true);
 	});
 
 	it("skips when token pressure was reduced by another compaction between trigger and microtask", async () => {

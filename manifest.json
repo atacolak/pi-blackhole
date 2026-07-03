@@ -1,0 +1,23 @@
+{
+  "name": "pi-blackhole",
+  "version": "0.3.7",
+  "description": "Unified deterministic compaction and observational memory for Pi, including recall search over session history.",
+  "provides": {
+    "tools": [
+      "recall"
+    ],
+    "skills": [],
+    "subagents": []
+  },
+  "requires": {
+    "environment": [
+      "PI_CODING_AGENT_DIR",
+      "PI_PROFILE"
+    ],
+    "binaries": [],
+    "capabilities": []
+  },
+  "toolDescriptions": {
+    "recall": "Search session history, indexed file content, observations, and reflections by text, regex, entry id, or memory id."
+  }
+}

@@ -59,12 +59,6 @@ export interface PendingOMState {
 	 * /blackhole flush.
 	 */
 	droppedBatches?: PendingDropped[];
-	/** Pipeline progress cursors — persist across restarts and fork recovery. */
-	cursors?: {
-		observer?: { entryId: string; state: string };
-		reflector?: { entryId: string; state: string };
-		dropper?: { entryId: string; state: string };
-	};
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
@@ -94,8 +88,6 @@ function defaultState(): PendingOMState {
 }
 
 function isEmptyState(s: PendingOMState): boolean {
-	const hasCursors = s.cursors && (s.cursors.observer || s.cursors.reflector || s.cursors.dropper);
-	if (hasCursors) return false;
 	return !s.observation && !s.reflection && !s.dropped
 		&& (!s.observationBatches || s.observationBatches.length === 0)
 		&& (!s.reflectionBatches || s.reflectionBatches.length === 0)
@@ -167,9 +159,7 @@ function isPendingOMState(value: unknown): value is PendingOMState {
 	const hasDrop = !!(v.dropped && typeof v.dropped === "object" && typeof (v.dropped as any).coversUpToId === "string");
 	// Also accept states with only batch arrays (no singular fields)
 	const hasBatches = Array.isArray(v.observationBatches) || Array.isArray(v.reflectionBatches) || Array.isArray(v.droppedBatches);
-	// Accept cursor-only states (no observations/reflections yet, but persisted)
-	const hasCursors = !!(v.cursors && typeof v.cursors === "object");
-	return hasObs || hasRef || hasDrop || hasBatches || hasCursors;
+	return hasObs || hasRef || hasDrop || hasBatches;
 }
 
 /**
@@ -276,20 +266,6 @@ export function clearPendingState(sessionId: string): void {
 /** Check whether there is any pending OM state for a specific session. */
 export function hasPendingData(sessionId: string): boolean {
 	return !isEmptyState(readSessionState(sessionId));
-}
-
-/** Read cursors from pending state for a session. */
-export function readPendingCursors(sessionId: string): PendingOMState["cursors"] {
-	const state = readSessionState(sessionId);
-	return state.cursors;
-}
-
-/** Write cursors to pending state for a session (replaces existing cursors).
- *  Uses assignment (not merge) so deletions from validateCursors persist. */
-export function writePendingCursors(sessionId: string, cursors: PendingOMState["cursors"]): void {
-	const state = readSessionState(sessionId);
-	state.cursors = { ...cursors };
-	writeSessionState(sessionId, state);
 }
 
 /**

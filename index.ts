@@ -17,7 +17,7 @@ import { registerCompactionTrigger } from "./src/om/compaction-trigger.js";
 import { registerRecallTool } from "./src/tools/recall";
 import { Runtime } from "./src/om/runtime.js";
 
-export default (pi: ExtensionAPI) => {
+export default async (pi: ExtensionAPI) => {
 	// ── Bridge: capture custom provider stream functions for jiti-loaded agents ──
 	// pi-blackhole's consolidation agents are loaded via jiti with moduleCache: false,
 	// which creates a separate pi-ai instance whose apiProviderRegistry lacks custom

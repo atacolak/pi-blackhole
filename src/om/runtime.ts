@@ -11,8 +11,6 @@
  */
 import { type Config, type ConfiguredModel, DEFAULTS, loadConfig } from "./config.js";
 import { isCooldownActive, getCooldownEntry, recordCooldown, expireCooldowns, modelKey } from "./cooldown.js";
-import { readPendingCursors, writePendingCursors } from "./pending.js";
-import type { PendingOMState } from "./pending.js";
 
 export type ResolveResult =
 	| { ok: true; model: any; apiKey: string; headers?: Record<string, string>; cooldownApplied?: boolean }
@@ -21,19 +19,6 @@ export type ResolveResult =
 type NotifyLevel = "warning" | "info" | "error";
 type Notify = (message: string, type?: NotifyLevel) => void;
 export type ConsolidationPhase = "observer" | "reflector" | "dropper";
-
-export type CursorState = "initial" | "recorded" | "empty" | "error" | "skipped" | "not_due";
-
-export interface PipelineCursor {
-	entryId: string;
-	state: CursorState;
-}
-
-export interface PipelineCursors {
-	observer?: PipelineCursor;
-	reflector?: PipelineCursor;
-	dropper?: PipelineCursor;
-}
 
 export interface ResolveCtx {
 	model: unknown;
@@ -69,10 +54,6 @@ export class Runtime {
 	failedInCycle: Set<string> = new Set();
 	compactInFlight = false;
 	compactHookInFlight = false;
-	/** AbortController for the pending auto-compaction wait loop, or null if none.
-	 * Set when handleAgentEnd schedules a wait; cleared on abort, success, or terminal bail.
-	 * agent_start handlers read this to abort the pending wait when a new turn starts. */
-	autoCompactionController: AbortController | null = null;
 	resolveFailureNotified = false;
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
@@ -83,10 +64,6 @@ export class Runtime {
 	compactionStats: { summarized: number; kept: number; keptTokensEst: number } | null = null;
 	/** Whether the most recent compaction was triggered by /blackhole (vs auto-compact). */
 	compactWasPiVcc = false;
-	/** In‑memory pipeline cursors — authoritative copy for gating decisions. */
-	cursors: PipelineCursors = {};
-	/** Session ID for which cursors have been loaded/validated.  Undefined until first load. */
-	cursorsLoadedSessionId: string | undefined = undefined;
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
@@ -272,57 +249,6 @@ export class Runtime {
 	isConsolidationRetryGated(): boolean {
 		if (!this.lastConsolidationErrorAt) return false;
 		return Date.now() - this.lastConsolidationErrorAt < CONSOLIDATION_RETRY_COOLDOWN_MS;
-	}
-
-	/** Get the current cursor for a pipeline stage. */
-	getCursor(stage: ConsolidationPhase): PipelineCursor | undefined {
-		return this.cursors[stage];
-	}
-
-	/** Advance a stage's cursor to a new entry ID with the given state. */
-	advanceCursor(stage: ConsolidationPhase, entryId: string, state: CursorState): void {
-		this.cursors[stage] = { entryId, state };
-	}
-
-	/** Load cursors from the per‑session pending file into the in‑memory map. */
-	loadCursorsFromPending(sessionId: string): void {
-		try {
-			const stored = readPendingCursors(sessionId);
-			if (!stored) return;
-			if (stored.observer?.entryId && stored.observer?.state) {
-				this.cursors.observer = { entryId: stored.observer.entryId, state: stored.observer.state as CursorState };
-			}
-			if (stored.reflector?.entryId && stored.reflector?.state) {
-				this.cursors.reflector = { entryId: stored.reflector.entryId, state: stored.reflector.state as CursorState };
-			}
-			if (stored.dropper?.entryId && stored.dropper?.state) {
-				this.cursors.dropper = { entryId: stored.dropper.entryId, state: stored.dropper.state as CursorState };
-			}
-		} catch {
-			// Best‑effort: missing or corrupt files are harmless.
-		}
-	}
-
-	/** Save in‑memory cursors to the per‑session pending file (synchronous, for tests). */
-	saveCursorsToPending(sessionId: string): void {
-		try {
-			writePendingCursors(sessionId, this.cursors as PendingOMState["cursors"]);
-		} catch {
-			// Best‑effort: graceful degradation on read‑only filesystems.
-		}
-	}
-
-	/** Schedule an async flush of cursors to the pending file.
-	 *  Uses a micro‑task to avoid blocking the pipeline. */
-	scheduleCursorFlush(sessionId: string): void {
-		const cursors = { ...this.cursors };
-		queueMicrotask(() => {
-			try {
-				writePendingCursors(sessionId, cursors as PendingOMState["cursors"]);
-			} catch {
-				// Best‑effort: graceful degradation.
-			}
-		});
 	}
 
 	launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {

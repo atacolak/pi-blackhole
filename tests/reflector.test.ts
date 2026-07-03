@@ -179,7 +179,7 @@ describe("V3 reflector agent", () => {
 
 		const result = await runReflector({ ...baseArgs, agentLoop: loop });
 
-		expect(result).toEqual([{ id: hashId(content), content, supportingObservationIds: ["aaaaaaaaaaaa", "bbbbbbbbbbbb"], tokenCount: estimateStringTokens(content) }]);
+		expect(result?.reflections).toEqual([{ id: hashId(content), content, supportingObservationIds: ["aaaaaaaaaaaa", "bbbbbbbbbbbb"], tokenCount: estimateStringTokens(content) }]);
 	});
 
 	it("rejects invented support ids and multiline content", async () => {
@@ -210,7 +210,7 @@ describe("V3 reflector agent", () => {
 
 		const result = await runReflector({ ...baseArgs, reflections: [existing], agentLoop: loop });
 
-		expect(result?.map((item) => item.content)).toEqual(["New durable fact."]);
+		expect(result?.reflections.map((item) => item.content)).toEqual(["New durable fact."]);
 	});
 
 	it("returns undefined when no tool call records reflections", async () => {

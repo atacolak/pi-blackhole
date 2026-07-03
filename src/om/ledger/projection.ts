@@ -30,6 +30,10 @@ export type ProjectionDiff = {
 
 export type CompactionProjectionConfig = {
 	observationsPoolMaxTokens: number;
+	/** When true (default), treat every compaction as a full-fold boundary for
+	 * reflections and drops. Prevents the starvation that occurs before the first
+	 * fullFold compaction when maintenanceBoundary defaults to noneBoundary. */
+	fullFoldAlways?: boolean;
 };
 
 export type CompactionProjection = Projection & {
@@ -196,10 +200,23 @@ export function buildCompactionProjection(
 	firstKeptEntryId: string,
 	config: CompactionProjectionConfig,
 ): CompactionProjection {
+	// fullFoldAlways (default true) prevents reflection/drop starvation before
+	// the first full-fold compaction. Without it, maintenanceBoundary stays at
+	// noneBoundary (-1), which excludes all reflections and drops from projection.
+	//
+	// The sentinel "" from buildOwnCut's compactAll path means "keep nothing —
+	// compact everything." Treat it as tipBoundary so all entries are visible.
+	const effectiveFirstKept = (firstKeptEntryId && firstKeptEntryId !== "") ? firstKeptEntryId : undefined;
+	const obsBoundary = effectiveFirstKept ? entryBoundary(effectiveFirstKept) : tipBoundary();
+
+	const fullFoldAlways = config.fullFoldAlways ?? true;
 	const fullFoldBoundaryId = latestFullFoldBoundaryId(entries);
-	const maintenanceBoundary = fullFoldBoundaryId ? entryBoundary(fullFoldBoundaryId) : noneBoundary();
+	const boundaryId = fullFoldAlways
+		? (fullFoldBoundaryId ?? effectiveFirstKept)
+		: fullFoldBoundaryId;
+	const maintenanceBoundary = boundaryId ? entryBoundary(boundaryId) : tipBoundary();
 	const normalProjection = foldProjection(entries, {
-		observationsBoundary: entryBoundary(firstKeptEntryId),
+		observationsBoundary: obsBoundary,
 		reflectionsBoundary: maintenanceBoundary,
 		dropsBoundary: maintenanceBoundary,
 	});

@@ -90,11 +90,6 @@ export interface UnifiedConfig {
 	reflectorInputMaxTokens: number;
 	/** Max prompt tokens for dropper model input (rolling window cap). */
 	dropperInputMaxTokens: number;
-	/** Pressure threshold for dropper.  When active observation pool tokens exceed
-	 *  this fraction of reflectorInputMaxTokens, the dropper runs even without new
-	 *  observations/reflections (to keep the pool pruned).
-	 *  Default 0.70 (70%). Must be in range (0, 1]. */
-	dropperPressureThreshold: number;
 	/** Max source entries tokens sent to observer per chunk. */
 	observerChunkMaxTokens: number;
 	/** Max preamble tokens (CURRENT REFLECTIONS / OBSERVATIONS) in the observer prompt.
@@ -132,6 +127,13 @@ export interface UnifiedConfig {
 	passive?: boolean;
 	/** Enables observational memory (workers + content injection). Set to false for pi-vcc only. */
 	memory: boolean;
+	/** Enables project-memory promotion/injection. Set to false to disable cross-session project memory. */
+	projectMemory?: boolean;
+	/** Token budget for project-memory system-prompt injection. */
+	projectMemoryInjectBudget: number;
+	/** When true (default), treat every compaction as a full-fold boundary for
+	 * reflections and drops. Prevents starvation before the first full-fold compaction. */
+	fullFoldAlways: boolean;
 	/** Writes debug JSONL to agent directory. */
 	debugLog: boolean;
 }
@@ -154,12 +156,18 @@ export const DEFAULTS: UnifiedConfig = {
 	observationsPoolTargetTokens: 10_000,
 	reflectorInputMaxTokens: 80_000,
 	dropperInputMaxTokens: 80_000,
-	dropperPressureThreshold: 0.70,
 	observerChunkMaxTokens: 40_000,
 	observerPreambleMaxTokens: 0,
 	agentMaxTurns: 16,
 
+	observerModel: { provider: "cpa", id: "gemini-3.1-flash-lite", thinking: "high" },
+	reflectorModel: { provider: "cpa", id: "gemini-3.1-flash-lite", thinking: "high" },
+	dropperModel: { provider: "cpa", id: "gemini-3.1-flash-lite", thinking: "high" },
+
 	memory: true,
+	projectMemory: true,
+	projectMemoryInjectBudget: 1500,
+	fullFoldAlways: true,
 	debugLog: false,
 };
 
@@ -240,15 +248,12 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
 	if (typeof raw.noAutoCompact === "boolean") c.noAutoCompact = raw.noAutoCompact;
 	if (typeof raw.passive === "boolean") c.passive = raw.passive;
 	if (typeof raw.memory === "boolean") c.memory = raw.memory;
+	if (typeof raw.projectMemory === "boolean") c.projectMemory = raw.projectMemory;
+	if (typeof raw.fullFoldAlways === "boolean") c.fullFoldAlways = raw.fullFoldAlways;
 	if (typeof raw.debugLog === "boolean") c.debugLog = raw.debugLog;
 
 	// Numeric fields — use nonNegativeInt for observerPreambleMaxTokens (0 = auto)
-	const numKeys = ["observeAfterTokens", "reflectAfterTokens", "compactAfterTokens", "observationsPoolMaxTokens", "observationsPoolTargetTokens", "reflectorInputMaxTokens", "dropperInputMaxTokens", "observerChunkMaxTokens", "observerPreambleMaxTokens", "agentMaxTurns"] as const;
-
-	// dropperPressureThreshold: fractional, must be in (0, 1]
-	if (typeof raw.dropperPressureThreshold === "number" && Number.isFinite(raw.dropperPressureThreshold) && raw.dropperPressureThreshold > 0 && raw.dropperPressureThreshold <= 1) {
-		c.dropperPressureThreshold = raw.dropperPressureThreshold;
-	}
+	const numKeys = ["observeAfterTokens", "reflectAfterTokens", "compactAfterTokens", "observationsPoolMaxTokens", "observationsPoolTargetTokens", "reflectorInputMaxTokens", "dropperInputMaxTokens", "observerChunkMaxTokens", "observerPreambleMaxTokens", "agentMaxTurns", "projectMemoryInjectBudget"] as const;
 	for (const k of numKeys) {
 		// observerPreambleMaxTokens accepts 0 (auto-compute); everything else must be > 0
 		const validator = k === "observerPreambleMaxTokens" ? nonNegativeInt : positiveInt;
@@ -412,6 +417,7 @@ export function loadUnifiedConfig(cwd: string): UnifiedConfig {
 		"reflectorInputMaxTokens", "dropperInputMaxTokens",
 		"observerChunkMaxTokens", "observerPreambleMaxTokens",
 		"agentMaxTurns",
+		"projectMemoryInjectBudget",
 	];
 	for (const k of REQUIRED_NUMERIC_KEYS) {
 		const v = (merged as Record<string, unknown>)[k];
@@ -424,11 +430,6 @@ export function loadUnifiedConfig(cwd: string): UnifiedConfig {
 	}
 
 
-
-	// Validate dropperPressureThreshold — must be in (0, 1]
-	if (typeof merged.dropperPressureThreshold !== "number" || !Number.isFinite(merged.dropperPressureThreshold) || merged.dropperPressureThreshold <= 0 || merged.dropperPressureThreshold > 1) {
-		merged.dropperPressureThreshold = DEFAULTS.dropperPressureThreshold;
-	}
 
 	// Derive observationsPoolTargetTokens if still unset or invalid (must be < max)
 	if (

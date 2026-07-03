@@ -18,6 +18,7 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, ObservationKind, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
+import { messageToTranscriptTurn, type TranscriptTurn } from "../../run-artifact.js";
 
 interface RunObserverArgs {
 	model: Model<any>;
@@ -128,6 +129,8 @@ export interface ObserverResult {
 		system: string;
 		user: string;
 	};
+	/** Full agent loop transcript — every message, thinking block, tool call, and tool result. */
+	transcript?: TranscriptTurn[];
 }
 
 export async function runObserver(args: RunObserverArgs): Promise<ObserverResult> {
@@ -259,10 +262,12 @@ ${conversation}`;
 
 	const stream = loop(prompts, context, config, signal, streamFn);
 	let agentError: string | undefined;
+	let transcript: TranscriptTurn[] = [];
 	for await (const event of stream) {
 		// Drain events; the tool's execute already collects records.
 		if (event.type === "agent_end") {
 			const msgs = ((event as any).messages || []) as Array<{ stopReason?: string; errorMessage?: string }>;
+			transcript = (msgs as any[]).map(messageToTranscriptTurn);
 			const lastMsg = msgs[msgs.length - 1];
 			if (lastMsg?.stopReason === "error") {
 				agentError = lastMsg.errorMessage ?? "Unknown API error";
@@ -289,8 +294,8 @@ ${conversation}`;
 		} else {
 			emptyReason = { kind: "no_new_content" };
 		}
-		return { observations: undefined, emptyReason, prompt: promptCapture };
+		return { observations: undefined, emptyReason, prompt: promptCapture, transcript };
 	}
 
-	return { observations: Array.from(accumulated.values()), prompt: promptCapture };
+	return { observations: Array.from(accumulated.values()), prompt: promptCapture, transcript };
 }
