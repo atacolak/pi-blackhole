@@ -191,25 +191,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropperResult | 
 		relevanceCounts: relevanceCounts(observations),
 		coverageSummaryByRelevance,
 	});
-	if (maxDropsAllowed <= 0) {
-		// Build prompt for ground-truth observability even though we skip the agent loop.
-		const earlyFullnessPercent = Math.round(fullness * 100);
-		const earlyExistingCtx = args.existingObservationsSummary
-			? `EXISTING ACTIVE OBSERVATIONS (for context only — these are NOT candidates for dropping):\n${args.existingObservationsSummary}\n\n`
-			: '';
-		const earlyUserText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\n${earlyExistingCtx}NEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${earlyFullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nMaximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}.\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
-		debugLog("dropper.result", {
-			reason: "not_over_target",
-			toolCallCount: 0,
-			rawRequestedIdsCount: 0,
-			acceptedCandidateCount: 0,
-			selectedDropsCount: 0,
-			selectedDropTokens: 0,
-			selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds([], observations, coverageById),
-			maxDropsAllowed,
-		});
-		return { dropIds: [], prompt: { system: DROPPER_SYSTEM, user: earlyUserText } };
-	}
+	if (maxDropsAllowed <= 0) return undefined;
 
 	const proposedDropIds: string[] = [];
 	const proposed = new Set<string>();

@@ -796,35 +796,52 @@ async function runDropperStage(
 			const effectiveReflectionCoverageId = sameRunReflectionCoverageId ?? latestReflectionCoverageId;
 			const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, effectiveReflectionCoverageId);
 			const observationTokens = newObservations.reduce((s: number, o: any) => s + (o.tokenCount ?? 0), 0);
-			const dropFullness = observationTokens / (runtime.config.observationsPoolMaxTokens || 1);
-			const dropUrgency = dropFullness < 0.30 ? "low" : dropFullness < 0.60 ? "medium" : "high";
-			gDropperRunIndex++;
-			const dropArtifact = dropperArtifact(
-				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
-				dropTokens, newObservations.length, reflectionsForDropper.length,
-				observationTokens, runtime.config.observationsPoolMaxTokens,
-				droppedIds.length > 0 ? droppedIds : undefined, dropFullness, dropUrgency,
-				dropResult ? { systemPrompt: dropResult.prompt.system, userPrompt: dropResult.prompt.user, transcript: dropResult.transcript } : undefined,
-			);
-			writeRunArtifact(ctx.cwd, sessionId, dropArtifact);
-			const data = coversUpToId && droppedIds.length > 0 ? buildObservationsDroppedData(droppedIds, coversUpToId, {
-				runIndex: gDropperRunIndex,
-				blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper"),
-			}) : undefined;
-			if (data && coversUpToId) {
-				if (runtime.config.noAutoCompact) {
-					savePendingDropped(sessionId, { coversUpToId, data });
-				} else {
-					appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+
+			// Only write an artifact when the dropper agent actually ran.
+			// When maxDropsAllowed <= 0 the loop is skipped entirely — no LLM
+			// call, no prompt, no transcript, nothing worth archiving.
+			if (dropResult) {
+				const dropFullness = observationTokens / (runtime.config.observationsPoolMaxTokens || 1);
+				const dropUrgency = dropFullness < 0.30 ? "low" : dropFullness < 0.60 ? "medium" : "high";
+				gDropperRunIndex++;
+				const dropArtifact = dropperArtifact(
+					{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
+					dropTokens, newObservations.length, reflectionsForDropper.length,
+					observationTokens, runtime.config.observationsPoolMaxTokens,
+					droppedIds.length > 0 ? droppedIds : undefined, dropFullness, dropUrgency,
+					{ systemPrompt: dropResult.prompt.system, userPrompt: dropResult.prompt.user, transcript: dropResult.transcript },
+				);
+				writeRunArtifact(ctx.cwd, sessionId, dropArtifact);
+				const data = coversUpToId && droppedIds.length > 0 ? buildObservationsDroppedData(droppedIds, coversUpToId, {
+					runIndex: gDropperRunIndex,
+					blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper"),
+				}) : undefined;
+				if (data && coversUpToId) {
+					if (runtime.config.noAutoCompact) {
+						savePendingDropped(sessionId, { coversUpToId, data });
+					} else {
+						appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+					}
+				} else if (coversUpToId && droppedIds.length === 0) {
+					// Coverage advancement: dropper ran clean — nothing needed pruning.
+					if (runtime.config.noAutoCompact) {
+						savePendingDropped(sessionId, { coversUpToId, data: { observationIds: [], coversUpToId, runIndex: gDropperRunIndex, blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper") } });
+					} else {
+						appendEntry(pi, OM_OBSERVATIONS_DROPPED, { observationIds: [], coversUpToId, runIndex: gDropperRunIndex, blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper") });
+					}
 				}
-			} else if (coversUpToId && droppedIds.length === 0) {
-				// Coverage advancement: dropper ran clean — nothing needed pruning.
-				// Write empty marker so coverage advances, preventing infinite re-trigger
-				// when the pool is well under budget.
-				if (runtime.config.noAutoCompact) {
-					savePendingDropped(sessionId, { coversUpToId, data: { observationIds: [], coversUpToId, runIndex: gDropperRunIndex, blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper") } });
-				} else {
-					appendEntry(pi, OM_OBSERVATIONS_DROPPED, { observationIds: [], coversUpToId, runIndex: gDropperRunIndex, blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper") });
+			} else {
+				// Dropper skipped (pool below minimum threshold). Advance coverage
+				// so the pipeline doesn't re-trigger on the same pool. No artifact —
+				// no LLM call happened, nothing to archive.
+				gDropperRunIndex++;
+				if (coversUpToId) {
+					const emptyMarker = { observationIds: [], coversUpToId, runIndex: gDropperRunIndex };
+					if (runtime.config.noAutoCompact) {
+						savePendingDropped(sessionId, { coversUpToId, data: emptyMarker });
+					} else {
+						appendEntry(pi, OM_OBSERVATIONS_DROPPED, emptyMarker);
+					}
 				}
 			}
 			return "continue";
