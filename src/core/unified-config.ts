@@ -100,6 +100,18 @@ export interface UnifiedConfig {
 	/** Shared turn cap for background memory agents. */
 	agentMaxTurns: number;
 
+	/** Optional prompt version identifiers for stage artifact provenance. */
+	promptVersions?: {
+		observer?: string;
+		reflector?: string;
+		dropper?: string;
+	};
+	/** Optional system prompt text overrides for memory workers. */
+	promptOverrides?: {
+		observer?: string;
+		reflector?: string;
+		dropper?: string;
+	};
 
 	/** Base model override for all memory workers. */
 	model?: OmModelConfig;

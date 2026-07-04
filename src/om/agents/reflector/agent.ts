@@ -38,6 +38,8 @@ interface RunReflectorArgs {
 	streamFn?: (model: any, context: any, options: any) => any;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
+	/** Optional system prompt override. When set, replaces REFLECTOR_SYSTEM. */
+	systemPrompt?: string;
 }
 
 const RecordReflectionsSchema = Type.Object({
@@ -92,6 +94,7 @@ export interface ReflectorResult {
 
 export async function runReflector(args: RunReflectorArgs): Promise<ReflectorResult | undefined> {
 	const { model, apiKey, headers, reflections, observations, signal } = args;
+	const effectiveSystemPrompt = args.systemPrompt ?? REFLECTOR_SYSTEM;
 	if (observations.length === 0) return undefined;
 
 	const allowedObservationIds = observations.map((observation) => observation.id);
@@ -143,11 +146,11 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
 
 	const userText = `${existingReflectionsContext}${existingObservationsContext}NEW REFLECTIONS TO PROCESS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(observations.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. If nothing is stable enough, do not call the tool.`;
 	const promptCapture = {
-		system: REFLECTOR_SYSTEM,
+		system: effectiveSystemPrompt,
 		user: userText,
 	};
 	const prompts: Message[] = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
-	const context: AgentContext = { systemPrompt: REFLECTOR_SYSTEM, messages: [], tools: [recordReflections as AgentTool<any>] };
+	const context: AgentContext = { systemPrompt: effectiveSystemPrompt, messages: [], tools: [recordReflections as AgentTool<any>] };
 	const reasoning = (model as { reasoning?: unknown }).reasoning;
 	const thinkingLevel = args.thinkingLevel ?? "low";
 	const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;

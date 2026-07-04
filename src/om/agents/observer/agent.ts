@@ -36,6 +36,8 @@ interface RunObserverArgs {
 	streamFn?: (model: any, context: any, options: any) => any;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
+	/** Optional system prompt override. When set, replaces OBSERVER_SYSTEM. */
+	systemPrompt?: string;
 }
 
 const RelevanceSchema = Type.Union([
@@ -135,8 +137,9 @@ export interface ObserverResult {
 
 export async function runObserver(args: RunObserverArgs): Promise<ObserverResult> {
 	const { model, apiKey, headers, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
+	const effectiveSystemPrompt = args.systemPrompt ?? OBSERVER_SYSTEM;
 	const conversation = chunk.trim();
-	if (!conversation) return { observations: undefined };
+	if (!conversation) return { observations: undefined, prompt: { system: effectiveSystemPrompt, user: "" } };
 
 	const accumulated = new Map<string, Observation>();
 	let toolCalled = false;
@@ -221,7 +224,7 @@ ${conversation}`;
 	];
 
 	const context: AgentContext = {
-		systemPrompt: OBSERVER_SYSTEM,
+		systemPrompt: effectiveSystemPrompt,
 		messages: [],
 		tools: [recordObservations as AgentTool<any>],
 	};
@@ -256,7 +259,7 @@ ${conversation}`;
 	const bridgeStreamFn = createBridgeStreamFn(streamSimple);
 	const streamFn = args.streamFn ?? bridgeStreamFn;
 	const promptCapture = {
-		system: OBSERVER_SYSTEM,
+		system: effectiveSystemPrompt,
 		user: userText,
 	};
 

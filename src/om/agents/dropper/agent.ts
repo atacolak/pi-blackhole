@@ -42,6 +42,8 @@ interface RunDropperArgs {
 	streamFn?: (model: any, context: any, options: any) => any;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
+	/** Optional system prompt override. When set, replaces DROPPER_SYSTEM. */
+	systemPrompt?: string;
 }
 
 const DROP_SKIP_FULLNESS = 0.10;
@@ -172,6 +174,7 @@ export interface DropperResult {
 
 export async function runDropper(args: RunDropperArgs): Promise<DropperResult | undefined> {
 	const { model, apiKey, headers, reflections, observations, budgetTokens, signal } = args;
+	const effectiveSystemPrompt = args.systemPrompt ?? DROPPER_SYSTEM;
 	if (observations.length === 0) return undefined;
 
 	const observationTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
@@ -268,11 +271,11 @@ export async function runDropper(args: RunDropperArgs): Promise<DropperResult | 
 
 	const userText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\n${existingObservationsContext}NEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nMaximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}.\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
 	const promptCapture = {
-		system: DROPPER_SYSTEM,
+		system: effectiveSystemPrompt,
 		user: userText,
 	};
 	const prompts: Message[] = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
-	const context: AgentContext = { systemPrompt: DROPPER_SYSTEM, messages: [], tools: [dropObservations as AgentTool<any>] };
+	const context: AgentContext = { systemPrompt: effectiveSystemPrompt, messages: [], tools: [dropObservations as AgentTool<any>] };
 	const reasoning = (model as { reasoning?: unknown }).reasoning;
 	const thinkingLevel = args.thinkingLevel ?? "low";
 	const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;

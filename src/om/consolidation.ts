@@ -224,6 +224,10 @@ function stageThinkingLevel(runtime: Runtime, stage: "observer" | "reflector" | 
 	return stageModel?.thinking ?? runtime.config.model?.thinking ?? "low";
 }
 
+function stagePromptOverride(runtime: Runtime, stage: "observer" | "reflector" | "dropper"): string | undefined {
+	return runtime.config.promptOverrides?.[stage];
+}
+
 export function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
 	return async (stage) => {
 		const stageFallbacks = stageFallbackModels(runtime, stage);
@@ -414,6 +418,8 @@ async function runObserverStage(
 		return "continue";
 	}
 
+	const observerPromptOverride = stagePromptOverride(runtime, "observer");
+
 	for (let attempt = 0; attempt < MAX_STAGE_ATTEMPTS; attempt++) {
 		const resolved = await resolveModel("observer");
 		if (!resolved) return "abort";
@@ -458,6 +464,7 @@ async function runObserverStage(
 				allowedSourceEntryIds: sourceEntryIds,
 				maxTurns: runtime.config.agentMaxTurns,
 				thinkingLevel: stageThinkingLevel(runtime, "observer", stageModelForThinking),
+				...(observerPromptOverride !== undefined ? { systemPrompt: observerPromptOverride } : {}),
 			});
 
 			if (result.observations && result.observations.length > 0) {
@@ -568,6 +575,8 @@ async function runReflectorStage(
 		if (!observationCoverageId) return { outcome: "continue", sameRunReflections: [] };
 	}
 
+	const reflectorPromptOverride = stagePromptOverride(runtime, "reflector");
+
 	for (let attempt = 0; attempt < MAX_STAGE_ATTEMPTS; attempt++) {
 		const resolved = await resolveModel("reflector");
 		if (!resolved) return { outcome: "abort", sameRunReflections: [] };
@@ -639,6 +648,7 @@ async function runReflectorStage(
 				existingObservationsSummary: existingObservationsSummary || undefined,
 				maxTurns: runtime.config.agentMaxTurns,
 				thinkingLevel: stageThinkingLevel(runtime, "reflector", stageModelForThinking),
+				...(reflectorPromptOverride !== undefined ? { systemPrompt: reflectorPromptOverride } : {}),
 			});
 
 			if (!reflectorResult || reflectorResult.reflections.length === 0) return { outcome: "continue", sameRunReflections: [] };
@@ -719,6 +729,8 @@ async function runDropperStage(
 		if (!observationCoverageId) return "continue";
 	}
 
+	const dropperPromptOverride = stagePromptOverride(runtime, "dropper");
+
 	for (let attempt = 0; attempt < MAX_STAGE_ATTEMPTS; attempt++) {
 		const resolved = await resolveModel("dropper");
 		if (!resolved) return "abort";
@@ -788,6 +800,7 @@ async function runDropperStage(
 				budgetTokens: runtime.config.observationsPoolMaxTokens,
 				maxTurns: runtime.config.agentMaxTurns,
 				thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),
+				...(dropperPromptOverride !== undefined ? { systemPrompt: dropperPromptOverride } : {}),
 			});
 			const droppedIds = dropResult?.dropIds ?? [];
 			const latestReflectionCoverageId = runtime.config.noAutoCompact
