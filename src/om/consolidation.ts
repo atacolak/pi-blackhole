@@ -789,7 +789,7 @@ async function runDropperStage(
 				maxTurns: runtime.config.agentMaxTurns,
 				thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),
 			});
-			const droppedIds = dropResult?.dropIds;
+			const droppedIds = dropResult?.dropIds ?? [];
 			const latestReflectionCoverageId = runtime.config.noAutoCompact
 				? pending?.reflection?.coversUpToId
 				: latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
@@ -803,11 +803,11 @@ async function runDropperStage(
 				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 				dropTokens, newObservations.length, reflectionsForDropper.length,
 				observationTokens, runtime.config.observationsPoolMaxTokens,
-				droppedIds ?? undefined, dropFullness, dropUrgency,
+				droppedIds.length > 0 ? droppedIds : undefined, dropFullness, dropUrgency,
 				dropResult ? { systemPrompt: dropResult.prompt.system, userPrompt: dropResult.prompt.user, transcript: dropResult.transcript } : undefined,
 			);
 			writeRunArtifact(ctx.cwd, sessionId, dropArtifact);
-			const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId, {
+			const data = coversUpToId && droppedIds.length > 0 ? buildObservationsDroppedData(droppedIds, coversUpToId, {
 				runIndex: gDropperRunIndex,
 				blackholeArtifact: artifactPath(ctx.cwd, sessionId, dropArtifact.timestamp, "dropper"),
 			}) : undefined;
@@ -817,7 +817,7 @@ async function runDropperStage(
 				} else {
 					appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
 				}
-			} else if (coversUpToId && droppedIds && droppedIds.length === 0) {
+			} else if (coversUpToId && droppedIds.length === 0) {
 				// Coverage advancement: dropper ran clean — nothing needed pruning.
 				// Write empty marker so coverage advances, preventing infinite re-trigger
 				// when the pool is well under budget.

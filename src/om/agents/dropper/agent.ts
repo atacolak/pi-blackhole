@@ -343,5 +343,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropperResult | 
 		selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(droppedIds, observations, coverageById),
 		maxDropsAllowed,
 	});
-	return droppedIds.length > 0 ? { dropIds: droppedIds, prompt: promptCapture, transcript } : undefined;
+	// Always return the result — zero-drop runs still carry ground-truth transcript + prompts
+	// that are essential for debugging and observability.
+	return { dropIds: droppedIds, prompt: promptCapture, transcript };
 }
