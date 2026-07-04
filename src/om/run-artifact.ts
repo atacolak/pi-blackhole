@@ -26,6 +26,10 @@ export interface StageArtifact {
   timestamp: string;
   /** Model used for this stage. */
   model: { provider: string; id: string };
+  /** Prompt version identifier for this stage (from promptVersions config). */
+  prompt_id?: string;
+  /** SHA-256 hash of the effective system prompt for this run. */
+  prompt_hash?: string;
   /** Summary of what was fed into the agentLoop. */
   input: Record<string, unknown>;
   /** Summary of what the agentLoop produced. */
@@ -139,13 +143,18 @@ export function observerArtifact(
     userPrompt?: string;
     coversUpToId?: string;
     transcript?: TranscriptTurn[];
+    promptId?: string;
+    promptHash?: string;
+    promptOverride?: boolean;
   },
 ): StageArtifact {
-  const { emptyReason, durationMs, systemPrompt, userPrompt, coversUpToId, transcript } = opts ?? {};
+  const { emptyReason, durationMs, systemPrompt, userPrompt, coversUpToId, transcript, promptId, promptHash, promptOverride } = opts ?? {};
   return {
     stage: "observer",
     timestamp: new Date().toISOString(),
     model,
+    ...(promptId ? { prompt_id: promptId } : {}),
+    ...(promptHash ? { prompt_hash: promptHash } : {}),
     input: {
       chunkTokens,
       priorReflections: priorReflectionCount,
@@ -154,6 +163,7 @@ export function observerArtifact(
       ...(coversUpToId ? { coversUpToId } : {}),
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(userPrompt ? { userPrompt } : {}),
+      ...(promptOverride ? { prompt_override: true } : {}),
     },
     output: emptyReason
       ? { emptyReason, observationCount: 0 }
@@ -188,19 +198,25 @@ export function reflectorArtifact(
     systemPrompt?: string;
     userPrompt?: string;
     transcript?: TranscriptTurn[];
+    promptId?: string;
+    promptHash?: string;
+    promptOverride?: boolean;
   },
 ): StageArtifact {
-  const { durationMs, systemPrompt, userPrompt, transcript } = opts ?? {};
+  const { durationMs, systemPrompt, userPrompt, transcript, promptId, promptHash, promptOverride } = opts ?? {};
   return {
     stage: "reflector",
     timestamp: new Date().toISOString(),
     model,
+    ...(promptId ? { prompt_id: promptId } : {}),
+    ...(promptHash ? { prompt_hash: promptHash } : {}),
     input: {
       accumulatedTokens: reflectionTokens,
       newObservations: newObservationCount,
       newReflections: newReflectionCount,
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(userPrompt ? { userPrompt } : {}),
+      ...(promptOverride ? { prompt_override: true } : {}),
     },
     output: {
       reflectionCount: reflections.length,
@@ -234,13 +250,18 @@ export function dropperArtifact(
     systemPrompt?: string;
     userPrompt?: string;
     transcript?: TranscriptTurn[];
+    promptId?: string;
+    promptHash?: string;
+    promptOverride?: boolean;
   },
 ): StageArtifact {
-  const { durationMs, systemPrompt, userPrompt, transcript } = opts ?? {};
+  const { durationMs, systemPrompt, userPrompt, transcript, promptId, promptHash, promptOverride } = opts ?? {};
   return {
     stage: "dropper",
     timestamp: new Date().toISOString(),
     model,
+    ...(promptId ? { prompt_id: promptId } : {}),
+    ...(promptHash ? { prompt_hash: promptHash } : {}),
     input: {
       accumulatedTokens: dropTokens,
       activeObservations: activeObservationCount,
@@ -251,6 +272,7 @@ export function dropperArtifact(
       urgency,
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(userPrompt ? { userPrompt } : {}),
+      ...(promptOverride ? { prompt_override: true } : {}),
     },
     output: {
       droppedCount: droppedIds?.length ?? 0,

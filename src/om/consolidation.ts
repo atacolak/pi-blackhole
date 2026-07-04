@@ -228,6 +228,10 @@ function stagePromptOverride(runtime: Runtime, stage: "observer" | "reflector" |
 	return runtime.config.promptOverrides?.[stage];
 }
 
+function stagePromptId(runtime: Runtime, stage: "observer" | "reflector" | "dropper"): string | undefined {
+	return runtime.config.promptVersions?.[stage];
+}
+
 export function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
 	return async (stage) => {
 		const stageFallbacks = stageFallbackModels(runtime, stage);
@@ -473,7 +477,8 @@ async function runObserverStage(
 					{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 					chunkTokens, priorReflections.length, priorObservations.length,
 					sourceEntryIds.length, result.observations,
-					{ systemPrompt: result.prompt.system, userPrompt: result.prompt.user, coversUpToId, transcript: result.transcript },
+					{ systemPrompt: result.prompt.system, userPrompt: result.prompt.user, coversUpToId, transcript: result.transcript,
+					  promptId: stagePromptId(runtime, "observer"), promptOverride: observerPromptOverride !== undefined },
 				);
 				writeRunArtifact(ctx.cwd, sessionId, artifact);
 				const data = buildObservationsRecordedData(result.observations, coversUpToId, {
@@ -517,7 +522,8 @@ async function runObserverStage(
 				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 				chunkTokens, priorReflections.length, priorObservations.length,
 				sourceEntryIds.length, [],
-				{ emptyReason: reasonLabel, systemPrompt: result.prompt.system, userPrompt: result.prompt.user, coversUpToId, transcript: result.transcript },
+				{ emptyReason: reasonLabel, systemPrompt: result.prompt.system, userPrompt: result.prompt.user, coversUpToId, transcript: result.transcript,
+				  promptId: stagePromptId(runtime, "observer"), promptOverride: observerPromptOverride !== undefined },
 			));
 			if (ctx.hasUI) ctx.ui?.notify(`Observational memory: no observations — ${reasonLabel}`, reasonLevel);
 			return "continue";
@@ -658,7 +664,8 @@ async function runReflectorStage(
 			const reflArtifact = reflectorArtifact(
 				{ provider: (resolved.model as any).provider ?? "unknown", id: (resolved.model as any).id ?? "unknown" },
 				reflectionTokens, newObservations.length, newReflections.length, reflectorResult.reflections,
-				{ systemPrompt: reflectorResult.prompt.system, userPrompt: reflectorResult.prompt.user, transcript: reflectorResult.transcript },
+				{ systemPrompt: reflectorResult.prompt.system, userPrompt: reflectorResult.prompt.user, transcript: reflectorResult.transcript,
+				  promptId: stagePromptId(runtime, "reflector"), promptOverride: reflectorPromptOverride !== undefined },
 			);
 			writeRunArtifact(ctx.cwd, sessionId, reflArtifact);
 
@@ -822,7 +829,8 @@ async function runDropperStage(
 					dropTokens, newObservations.length, reflectionsForDropper.length,
 					observationTokens, runtime.config.observationsPoolMaxTokens,
 					droppedIds.length > 0 ? droppedIds : undefined, dropFullness, dropUrgency,
-					{ systemPrompt: dropResult.prompt.system, userPrompt: dropResult.prompt.user, transcript: dropResult.transcript },
+					{ systemPrompt: dropResult.prompt.system, userPrompt: dropResult.prompt.user, transcript: dropResult.transcript,
+					  promptId: stagePromptId(runtime, "dropper"), promptOverride: dropperPromptOverride !== undefined },
 				);
 				writeRunArtifact(ctx.cwd, sessionId, dropArtifact);
 				const data = coversUpToId && droppedIds.length > 0 ? buildObservationsDroppedData(droppedIds, coversUpToId, {
