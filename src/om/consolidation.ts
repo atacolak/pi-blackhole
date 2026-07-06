@@ -762,8 +762,6 @@ async function runDropperStage(
 				if (idx >= 0) effectiveDropTokens = rawTokensAfterIndex(entries, idx);
 			}
 		}
-		if (ctx.hasUI) ctx.ui?.notify(`Observational memory: dropper running (~${effectiveDropTokens.toLocaleString()} tokens accumulated, ~${dropperInputTokens.toLocaleString()}-token input)`, "info");
-
 		try {
 			// Existing active observations summary for context (capped).
 			// In noAutoCompact, merge accumulated pending batches with
@@ -821,6 +819,13 @@ async function runDropperStage(
 			// When maxDropsAllowed <= 0 the loop is skipped entirely — no LLM
 			// call, no prompt, no transcript, nothing worth archiving.
 			if (dropResult) {
+				if (ctx.hasUI) {
+					if (droppedIds.length > 0) {
+						ctx.ui?.notify(`Observational memory: dropper pruned ${droppedIds.length} observation${droppedIds.length === 1 ? "" : "s"}`, "info");
+					} else {
+						ctx.ui?.notify(`Observational memory: dropper completed — no observations needed pruning`, "info");
+					}
+				}
 				const dropFullness = observationTokens / (runtime.config.observationsPoolMaxTokens || 1);
 				const dropUrgency = dropFullness < 0.30 ? "low" : dropFullness < 0.60 ? "medium" : "high";
 				gDropperRunIndex++;
