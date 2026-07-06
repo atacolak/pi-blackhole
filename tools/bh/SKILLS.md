@@ -36,7 +36,7 @@ session can be a UUID (auto-discovered from `~/.pi/profiles/*/sessions/raw/`) or
 | `bh gaps <s>` | anomalies: compactions, model changes, prompt overrides, unknown types |
 | `bh provenance <s>` | prompt versions, hashes, and overrides per stage run |
 | `bh epochs <s>` | compaction-bounded memory epochs with OM binning |
-| `bh render <s>` | export to Obsidian vault markdown |
+| `bh render <s>` | export to Obsidian vault markdown — observations, reflections, per-compaction epoch files, and session overview |
 
 ## typical agent workflow
 

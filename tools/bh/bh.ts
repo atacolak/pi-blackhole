@@ -1119,6 +1119,104 @@ function cmdRender(spec: string) {
     }
   }
 
+  // ─── Extract all compactions and bin OM data into epochs ──────────────
+  const entryLine = new Map<string, number>();
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].id) entryLine.set(entries[i].id!, i);
+  }
+
+  // Extract all compactions
+  const allCompactions: Array<{ id: string; index: number; entry: CompactionEntry }> = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i] as CompactionEntry;
+    if (e.type === "compaction") {
+      allCompactions.push({ id: e.id ?? `compaction-${allCompactions.length}`, index: i, entry: e });
+    }
+  }
+
+  // Extract all raw OM items with their source entry line positions
+  interface RawOMItem {
+    id: string;
+    content: string;
+    sourceEntryIds?: string[];
+    kind?: string;
+    supportingObservationIds?: string[];
+    entryLine: number;
+  }
+  const allRawObs: RawOMItem[] = [];
+  const allRawRefs: RawOMItem[] = [];
+  const allRawDrops: Array<{ observationIds: string[]; entryLine: number }> = [];
+
+  for (const e of entries) {
+    if (e.type !== "custom") continue;
+    const ce = e as any;
+    const eid = e.id;
+    const line = eid ? (entryLine.get(eid) ?? -1) : -1;
+    if (ce.customType === "om.observations.recorded" && ce.data?.observations) {
+      for (const o of ce.data.observations) {
+        allRawObs.push({ id: o.id, content: o.content, sourceEntryIds: o.sourceEntryIds, kind: o.kind, entryLine: line });
+      }
+    }
+    if (ce.customType === "om.reflections.recorded" && ce.data?.reflections) {
+      for (const r of ce.data.reflections) {
+        allRawRefs.push({ id: r.id, content: r.content, supportingObservationIds: r.supportingObservationIds, entryLine: line });
+      }
+    }
+    if (ce.customType === "om.observations.dropped" && ce.data?.observationIds) {
+      allRawDrops.push({ observationIds: ce.data.observationIds, entryLine: line });
+    }
+  }
+
+  // Bin into epochs
+  const compactionLines = allCompactions.map(c => ({ line: c.index, comp: c })).sort((a, b) => a.line - b.line);
+
+  function binItems<T extends { entryLine: number }>(items: T[]): T[][] {
+    const bins: T[][] = Array.from({ length: compactionLines.length + 1 }, () => []);
+    for (const item of items) {
+      let placed = false;
+      for (let bi = 0; bi < compactionLines.length; bi++) {
+        if (item.entryLine < compactionLines[bi].line) {
+          bins[bi].push(item);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) bins[bins.length - 1].push(item);
+    }
+    return bins;
+  }
+
+  const obsBins = binItems(allRawObs);
+  const refBins = binItems(allRawRefs);
+  const dropBins = binItems(allRawDrops);
+
+  const epochs: Array<{
+    label: string;
+    compaction: typeof allCompactions[0] | null;
+    observations: typeof allRawObs;
+    reflections: typeof allRawRefs;
+    drops: typeof allRawDrops;
+  }> = [];
+
+  for (let i = 0; i < compactionLines.length; i++) {
+    const label = i === 0 ? "birth \u2192 compaction 1" : `compaction ${i} \u2192 compaction ${i + 1}`;
+    epochs.push({
+      label,
+      compaction: compactionLines[i].comp,
+      observations: obsBins[i],
+      reflections: refBins[i],
+      drops: dropBins[i],
+    });
+  }
+  // Final epoch
+  epochs.push({
+    label: compactionLines.length > 0 ? `compaction ${compactionLines.length} \u2192 end` : "birth \u2192 end",
+    compaction: null,
+    observations: obsBins[obsBins.length - 1],
+    reflections: refBins[refBins.length - 1],
+    drops: dropBins[dropBins.length - 1],
+  });
+
   // Generate unique slugs for everything
   const usedSlugs = new Set<string>();
   const refSlug = new Map<string, string>(); // reflection id -> slug
@@ -1168,9 +1266,11 @@ function cmdRender(spec: string) {
   const obsDir = join(baseDir, "obs");
   const srcDir = join(baseDir, "src");
 
+  const compDir = join(baseDir, "compactions");
   mkdirSync(refDir, { recursive: true });
   mkdirSync(obsDir, { recursive: true });
   mkdirSync(srcDir, { recursive: true });
+  mkdirSync(compDir, { recursive: true });
 
   
 // Build full observation content lookup (folded + pruned)
@@ -1484,6 +1584,108 @@ back to session: [[${vaultBase}/session]]
       + summaryParts.join(" · ") + "\n\n"
       + "[[" + vaultBase + "/stages/index|View full stage timeline →]]\n";
   }
+
+  // ─── Write compaction files ────────────────────────────────────────────
+  const compactionLinks: string[] = [];
+  for (const epoch of epochs) {
+    const comp = epoch.compaction;
+    if (!comp) continue;
+    const c = comp.entry;
+    const cid = comp.id;
+    const ts = c.timestamp?.substring(0, 19).replace("T", " ") ?? "?";
+    const tokens = (c as any).tokensBefore ?? 0;
+    const details = c.details as any;
+    const folded = details?.["om.folded"];
+    const foldedObs = folded?.observations?.length ?? 0;
+    const foldedRefs = folded?.reflections?.length ?? 0;
+    const sourceCount = details?.sourceMessageCount ?? 0;
+    const sections = details?.sections ?? [];
+    const prevUsed = details?.previousSummaryUsed ?? false;
+    const totalDroppedIds = epoch.drops.reduce((sum, d) => sum + d.observationIds.length, 0);
+    const summaryText = c.summary ?? "";
+
+    const epochObsList = epoch.observations.length > 0
+      ? epoch.observations.map(o => {
+          const kind = o.kind ?? "objective";
+          const sym = KIND_SYM[kind] ?? "⇲";
+          const slug = obsSlug.get(o.id);
+          return `- ${sym} [[${vaultBase}/obs/${slug ?? o.id.substring(0, 12)}|${displayText(o.content, 80)}]]`;
+        }).join("\n")
+      : "*(none)*";
+
+    const epochRefList = epoch.reflections.length > 0
+      ? epoch.reflections.map(r => {
+          const slug = refSlug.get(r.id);
+          const supportLinks = (r.supportingObservationIds ?? [])
+            .map(sid => `[[${vaultBase}/obs/${obsSlug.get(sid) ?? sid.substring(0, 12)}]]`)
+            .join(", ");
+          return `- [[${vaultBase}/ref/${slug ?? r.id.substring(0, 12)}|${displayText(r.content, 80)}]]${supportLinks ? `\n  - supporting: ${supportLinks}` : ""}`;
+        }).join("\n")
+      : "*(none)*";
+
+    const epochDropList = epoch.drops.length > 0
+      ? epoch.drops.map((d, i) => {
+          const droppedLinks = d.observationIds
+            .map(did => `[[${vaultBase}/obs/${obsSlug.get(did) ?? did.substring(0, 12)}]]`)
+            .join(", ");
+          return `- run ${i + 1}${droppedLinks ? `: dropped ${droppedLinks}` : ": *(no drops)*"}`;
+        }).join("\n")
+      : "*(none)*";
+
+    const content = `---
+session: ${sessionLabel}
+session_id: "${sesId}"
+compaction_id: "${cid}"
+timestamp: ${ts}
+tokens_before: ${tokens}
+source_messages: ${sourceCount}
+sections: ${JSON.stringify(sections)}
+om_folded_observations: ${foldedObs}
+om_folded_reflections: ${foldedRefs}
+previous_summary_used: ${String(prevUsed)}
+epoch: "${epoch.label}"
+epoch_observations: ${epoch.observations.length}
+epoch_reflections: ${epoch.reflections.length}
+epoch_dropper_runs: ${epoch.drops.length}
+epoch_dropped_ids: ${totalDroppedIds}
+---
+
+# compaction \`${cid}\`
+
+**when**: ${ts} · **tokens before**: ${tokens.toLocaleString()}
+
+## summary
+
+${summaryText.trim() || "*(empty)*"}
+
+---
+
+## epoch: ${epoch.label}
+
+### observations (${epoch.observations.length})
+
+${epochObsList}
+
+### reflections (${epoch.reflections.length})
+
+${epochRefList}
+
+### dropper runs (${epoch.drops.length})
+
+${epochDropList}
+
+---
+back to session: [[${vaultBase}/session]]
+`;
+    const fname = `compaction_${cid}.md`;
+    writeFileSync(join(compDir, fname), content);
+    const tsShort = ts.substring(11, 19);
+    const compLabel = epoch.label.includes("→")
+      ? epoch.label.split("→")[0].trim().replace("compaction ", "#")
+      : epoch.label;
+    compactionLinks.push(`- [[${vaultBase}/compactions/${fname}|compaction ${compLabel}]] — ${tsShort} · ${tokens.toLocaleString()} tok`);
+  }
+
 // ─── Write session entry point ────────────────────────────────────────
   function obsListItem(o: typeof obs[0] & { _pruned?: boolean }): string {
     const sym = o.kind ? (KIND_SYM[o.kind] ?? "?") : "";
@@ -1544,6 +1746,16 @@ back to session: [[${vaultBase}/session]]
   const summaryHeader = headerLines.join("\n").trim();
   const fullSummaryIncluded = headerLines.length < summaryLines.length;
 
+  const compactionStats = allCompactions.length > 0
+    ? `\n- compactions: ${allCompactions.length}`
+    : "";
+
+  const compactionsSection = compactionLinks.length > 0
+    ? `## Compactions (${allCompactions.length})
+
+${compactionLinks.join("\n")}\n`
+    : "";
+
   const sessionNote = `# Session: ${sessionLabel}
 
 ${summaryHeader || "*(no compaction summary)*"}
@@ -1554,7 +1766,7 @@ ${fullSummaryIncluded ? `> Full compaction summary available (\`bh overview ${se
 
 ## Stats
 - session id: \`${sesId}\`
-- total entries: ${entries.length}
+- total entries: ${entries.length}${compactionStats}
 - observations recorded: ${totalObs}
 - reflections recorded: ${totalRef}
 - observations pruned: ${totalDrop}
@@ -1580,12 +1792,12 @@ ${prunedObs.length > 0 ? `## Observations — pruned but cited (${prunedObs.leng
 ${prunedObsList}
 ` : ""}
 
-
+${compactionsSection}
 
 ${stageList}`;
   writeFileSync(join(baseDir, "session.md"), sessionNote);
 
-  console.log(`\nwrote ${refs.length} reflections, ${obs.length} observations, ${sourceEntryIds.size} sources to ${baseDir}`);
+  console.log(`\nwrote ${refs.length} reflections, ${obs.length} observations, ${sourceEntryIds.size} sources, ${allCompactions.length} compactions to ${baseDir}`);
   console.log(`open obsidian at ~/vault/ and navigate to ${vaultBase}/session.md`);
 }
 
